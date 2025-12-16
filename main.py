@@ -2,7 +2,8 @@ import os
 import sys
 import argparse
 
-import torch
+import jax
+import jax.numpy as jnp
 import random
 import numpy as np
 import inspect
@@ -17,7 +18,8 @@ load_dotenv()
 
 logger.remove()
 
-torch.manual_seed(0)
+# Set random seeds for reproducibility
+# JAX uses explicit PRNGKey which is handled in the trainer
 random.seed(0)
 np.random.seed(0)
 
@@ -57,5 +59,10 @@ if __name__ == "__main__":
         enqueue=True,
         filter=lambda x: x["extra"].get("task", "") != "plot",
     )
+
+    # Log JAX device information
+    logger.info(f"JAX devices: {jax.devices()}")
+    logger.info(f"JAX process count: {jax.process_count()}")
+    logger.info(f"JAX process index: {jax.process_index()}")
 
     execute(args)

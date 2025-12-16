@@ -7,6 +7,8 @@ References:
 https://github.com/openai/gpt-2/blob/master/src/model.py
 2) huggingface/transformers PyTorch implementation:
 https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
+
+Converted to JAX/Flax/Haliax for TPU/XLA training.
 """
 
 import math
@@ -14,68 +16,89 @@ import inspect
 from dataclasses import dataclass
 from typing import Tuple, Optional, List
 
-import torch
-import torch.nn as nn
-from torch.nn import functional as F
+import jax
+import jax.numpy as jnp
+from jax import lax
+import flax.linen as nn
+from flax import struct
+
+import haliax as hax
+from haliax import Axis, NamedArray
+from haliax.nn import LayerNorm as HaxLayerNorm
 
 from loguru import logger
 from utils import plot
 
-from muon import MuonWithAuxAdam, SingleDeviceMuonWithAuxAdam
 
-class RotaryPosEncoding(torch.nn.Module):
-    """RoPE implementation by Róbert Csordás"""
+# Define axis names for Haliax
+@struct.dataclass
+class AxesConfig:
+    Batch: Axis
+    Pos: Axis
+    MaxPos: Axis
+    Embed: Axis
+    Heads: Axis
+    HeadDim: Axis
+    Vocab: Axis
+    Mlp: Axis
+
+
+class RotaryPosEncoding:
+    """RoPE implementation by Róbert Csordás, converted to JAX"""
     def __init__(self, d_model: int, base=10000, seq_dim: int = 1):
-        super().__init__()
-
         if d_model % 2 != 0:
             raise ValueError("RoPE can only be used with an even number of dimensions")
 
-        inv_freq = 1.0 / (base ** (torch.arange(0, d_model, 2).float() / d_model))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.d_model = d_model
+        self.base = base
+        self.seq_dim = seq_dim
+
+        # Compute inverse frequencies
+        inv_freq = 1.0 / (base ** (jnp.arange(0, d_model, 2, dtype=jnp.float32) / d_model))
+        self.inv_freq = inv_freq
+
+        # Cache for sin/cos
         self.seq_len_cached = 0
         self.cos_cached = None
         self.sin_cached = None
-        self.seq_dim = seq_dim
 
-    def rotate_half(self, x: torch.Tensor) -> torch.Tensor:
+    def rotate_half(self, x: jnp.ndarray) -> jnp.ndarray:
         x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
-        return torch.cat(
-            (-x2, x1), dim=x1.ndim - 1
-        )  # dim=-1 triggers a bug in torch < 1.8.0
+        return jnp.concatenate((-x2, x1), axis=-1)
 
-    def apply_rot(self, x: torch.Tensor, sinp: torch.Tensor, cosp: torch.Tensor, seq_dim: int, offset: int) -> torch.Tensor:
-        sin = sinp.narrow(seq_dim, offset, x.shape[seq_dim])
-        cos = cosp.narrow(seq_dim, offset, x.shape[seq_dim])
+    def apply_rot(self, x: jnp.ndarray, sinp: jnp.ndarray, cosp: jnp.ndarray,
+                  seq_dim: int, offset: int) -> jnp.ndarray:
+        sin = lax.dynamic_slice_in_dim(sinp, offset, x.shape[seq_dim], axis=seq_dim)
+        cos = lax.dynamic_slice_in_dim(cosp, offset, x.shape[seq_dim], axis=seq_dim)
         return (x * cos) + (self.rotate_half(x) * sin)
 
-    def apply_rotary_pos_emb(self, q: torch.Tensor, k: torch.Tensor, sin: torch.Tensor, cos: torch.Tensor,
-                             seq_dim: int, offset: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def apply_rotary_pos_emb(self, q: jnp.ndarray, k: jnp.ndarray, sin: jnp.ndarray,
+                            cos: jnp.ndarray, seq_dim: int, offset: int) -> Tuple[jnp.ndarray, jnp.ndarray]:
         return self.apply_rot(q, sin, cos, seq_dim, offset), self.apply_rot(k, sin, cos, seq_dim, 0)
 
-    def get(self, x: torch.Tensor, t: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def get(self, x: jnp.ndarray, t: Optional[jnp.ndarray] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
         seq_len = x.shape[self.seq_dim]
         enable_cache = t is None
 
         if (not enable_cache) or (seq_len > self.seq_len_cached):
             self.seq_len_cached = seq_len
             if t is None:
-                t = torch.arange(x.shape[self.seq_dim], device=x.device)
+                t = jnp.arange(x.shape[self.seq_dim], dtype=jnp.float32)
 
-            t = t.type_as(self.inv_freq)
+            t = t.astype(self.inv_freq.dtype)
 
-            freqs = torch.einsum("...i,j->...ij", t, self.inv_freq)
-            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
+            freqs = jnp.einsum("...i,j->...ij", t, self.inv_freq)
+            emb = jnp.concatenate((freqs, freqs), axis=-1)
 
             tgt_shape = [1] * x.ndim
             tgt_shape[self.seq_dim] = seq_len
             tgt_shape[-1] = x.shape[-1]
 
-            # support batch.
+            # support batch
             tgt_shape[0] = -1
 
-            cos = emb.cos().view(*tgt_shape)
-            sin = emb.sin().view(*tgt_shape)
+            cos = jnp.cos(emb).reshape(tgt_shape)
+            sin = jnp.sin(emb).reshape(tgt_shape)
 
             if enable_cache:
                 self.cos_cached = cos
@@ -85,609 +108,463 @@ class RotaryPosEncoding(torch.nn.Module):
 
         return self.sin_cached, self.cos_cached
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor,
-                pos_offset: int=0,
-                t: Optional[torch.Tensor]=None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __call__(self, q: jnp.ndarray, k: jnp.ndarray, pos_offset: int = 0,
+                t: Optional[jnp.ndarray] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
         sin, cos = self.get(k, t)
         return self.apply_rotary_pos_emb(q, k, sin, cos, self.seq_dim, pos_offset)
 
+
 class LayerNorm(nn.Module):
-    """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
+    """LayerNorm but with an optional bias. JAX/Flax version"""
+    ndim: int
+    bias: bool
 
-    def __init__(self, ndim, bias):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(ndim))
-        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+    @nn.compact
+    def __call__(self, x):
+        weight = self.param('weight', nn.initializers.ones, (self.ndim,))
+        bias = self.param('bias', nn.initializers.zeros, (self.ndim,)) if self.bias else None
 
-    def forward(self, input):
-        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+        mean = jnp.mean(x, axis=-1, keepdims=True)
+        var = jnp.var(x, axis=-1, keepdims=True)
+        x_norm = (x - mean) / jnp.sqrt(var + 1e-5)
+
+        if bias is not None:
+            return weight * x_norm + bias
+        else:
+            return weight * x_norm
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        assert config.n_embd % config.n_head == 0
-        # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        # regularization
-        self.attn_dropout = nn.Dropout(config.dropout)
-        self.resid_dropout = nn.Dropout(config.dropout)
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
-        self.dropout = config.dropout
-        # rotational position embedding
-        self.rope = RotaryPosEncoding(config.n_embd//config.n_head, seq_dim = -2)
-        # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
-        assert hasattr(torch.nn.functional, "scaled_dot_product_attention"), "Flash Attention requires PyTorch >= 2.0"
-        self.config = config
+    config: any
 
-        # we cache the computed attention masks; we don't need to save this
-        # Map: (int,int) -> torch.Tensor
-        # q.size(-2), k.size(-2) ->
-        #          torch.ones(q.size(-2), k.size(-2), dtype=torch.bool).tril(diagonal=0)
-        self.__cached_casual_mask = {}
+    def setup(self):
+        assert self.config.n_embd % self.config.n_head == 0
 
-    def compute_channels(
-            self, x, cumulative_scores,
-            token_index, padding_mask=None
-    ):
-        B, T, C = (
-            x.size()
-        )  # batch size, sequence length, embedding dimensionality (n_embd)
+        self.n_head = self.config.n_head
+        self.n_embd = self.config.n_embd
+        self.dropout_rate = self.config.dropout
 
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T, hs)
+        # Initialize RoPE
+        self.rope = RotaryPosEncoding(self.config.n_embd // self.config.n_head, seq_dim=-2)
 
-        # apply position embeddings: RoPE with fractional rotations
-        # based on the number of forks
-        # number of forks for each token, ^-1 of which is the
-        # "moves" that each fork will contribute from 0
-        token_counts = torch.scatter_add(
-            torch.zeros(
-                *token_index.shape[:-1], self.config.block_size,
-                dtype=token_index.dtype,
-                device=token_index.device,
-            ),
-            -1,
-            token_index,
-            torch.ones_like(token_index)
+        # Cache for causal masks
+        self.cached_causal_mask = {}
+
+    @nn.compact
+    def __call__(self, x, cumulative_scores, token_index, padding_mask=None, deterministic=False):
+        B, T, C = x.shape
+
+        # QKV projection
+        c_attn_weight = self.param('c_attn_weight',
+                                   nn.initializers.normal(stddev=0.02),
+                                   (C, 3 * C))
+        c_attn_bias = self.param('c_attn_bias',
+                                nn.initializers.zeros,
+                                (3 * C,)) if self.config.bias else None
+
+        qkv = x @ c_attn_weight
+        if c_attn_bias is not None:
+            qkv = qkv + c_attn_bias
+
+        q, k, v = jnp.split(qkv, 3, axis=2)
+
+        # Reshape for multi-head attention
+        k = k.reshape(B, T, self.n_head, C // self.n_head).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
+        q = q.reshape(B, T, self.n_head, C // self.n_head).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
+        v = v.reshape(B, T, self.n_head, C // self.n_head).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
+
+        # Apply RoPE with fractional rotations based on forks
+        # Compute token counts for fractional rotations
+        block_size = self.config.block_size
+        token_counts = jnp.zeros((*token_index.shape[:-1], block_size), dtype=token_index.dtype)
+        token_counts = token_counts.at[..., token_index].add(1)
+
+        partial_rotations = jnp.cumsum(
+            jnp.take_along_axis(1 / (token_counts + 1e-10), token_index, axis=-1),
+            axis=-1
         )
-        # token_counts = scatter_add(torch.ones_like(token_index), token_index, -1)
-        partial_rotations = torch.cumsum(
-            torch.gather(
-                (1/token_counts),
-                -1,
-                token_index
-            ),
-            dim=-1
-        )
-        q,k = self.rope(q,k,t=partial_rotations)
+        q, k = self.rope(q, k, t=partial_rotations)
 
-        # stick an extra row of 1s to the end of q (this is for cumulative score addition pre softmax)
-        # yes we do loose a channel, but sadly the alternative is to launch a whole new kernel cell just for
-        # padding the next 15 elements with blanks (i.e. to have dims be (... x 129)), which is bad juju
+        # Fork-specific: use last channel for cumulative scores
         if "fork" in self.config.plan:
-            q[:,:,:, -1] = torch.ones_like(q[:,:,:, -1])
-            k[:,:,:, -1] = cumulative_scores.unsqueeze(-2).repeat(1, k.size(1), 1)
+            q = q.at[:, :, :, -1].set(jnp.ones_like(q[:, :, :, -1]))
+            k = k.at[:, :, :, -1].set(jnp.repeat(cumulative_scores[:, None, :], k.shape[1], axis=1))
 
-        # build causal attention mask if not already cached
-        casual_mask = self.__cached_casual_mask.get((q.size(-2), k.size(-2)))
-        if casual_mask is None:
-            casual_mask = torch.ones(
-                q.size(-2),
-                k.size(-2),
-            ).tril(diagonal=0).to(q.device).bool()
-            casual_mask = torch.where(
-                casual_mask,
-                torch.zeros_like(casual_mask, dtype=torch.bfloat16),
-                torch.full_like(casual_mask, float("-inf"), dtype=torch.bfloat16)
-            )
-            self.__cached_casual_mask[(q.size(-2), k.size(-2))] = casual_mask
-        casual_mask = casual_mask.unsqueeze(0).repeat(x.size(0), 1, 1)
-        mask = casual_mask
+        # Build causal attention mask
+        mask_key = (q.shape[-2], k.shape[-2])
+        if mask_key not in self.cached_causal_mask:
+            causal_mask = jnp.tril(jnp.ones((q.shape[-2], k.shape[-2]), dtype=jnp.bool_))
+            causal_mask = jnp.where(causal_mask,
+                                   jnp.zeros_like(causal_mask, dtype=jnp.float32),
+                                   jnp.full_like(causal_mask, float("-inf"), dtype=jnp.float32))
+            self.cached_causal_mask[mask_key] = causal_mask
 
-        # add additional padding mask, if necessary
+        causal_mask = self.cached_causal_mask[mask_key]
+        causal_mask = jnp.repeat(causal_mask[None, :, :], B, axis=0)
+        mask = causal_mask
+
+        # Add padding mask if necessary
         if padding_mask is not None:
-            padding_mask = padding_mask.gather(1, token_index)
-            padding_mask_fl = (padding_mask).float()
-            padding_mask_outer = (
-                padding_mask_fl.unsqueeze(-1) @
-                padding_mask_fl.unsqueeze(-2)
+            padding_mask = jnp.take_along_axis(padding_mask, token_index, axis=1)
+            padding_mask_fl = padding_mask.astype(jnp.float32)
+            padding_mask_outer = padding_mask_fl[:, :, None] @ padding_mask_fl[:, None, :]
+            padding_mask_additive = jnp.where(
+                padding_mask_outer.astype(jnp.bool_),
+                jnp.zeros_like(padding_mask_outer, dtype=jnp.float32),
+                jnp.full_like(padding_mask_outer, float("-inf"), dtype=jnp.float32)
             )
-            padding_mask_additive = torch.where(
-                padding_mask_outer.bool(),
-                torch.zeros_like(padding_mask_outer, dtype=torch.bfloat16),
-                torch.full_like(padding_mask_outer, float("-inf"), dtype=torch.bfloat16)
-            )
-            mask += padding_mask_additive
+            mask = mask + padding_mask_additive
 
-        return q,k,v,mask
+        # Attenuate v values with cumulative scores
+        v = jnp.einsum("bnlh,bl->bnlh", v, jnp.exp(cumulative_scores))
 
-    def forward(self, x, cumulative_scores, token_index, padding_mask=None):
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        B, T, C = (
-            x.size()
-        )  # batch size, sequence length, embedding dimensionality (n_embd)
+        # Scaled dot-product attention
+        mask_4d = jnp.repeat(mask[:, None, :, :], self.n_head, axis=1)
 
-        q,k,v,mask = self.compute_channels(
-            x,
-            cumulative_scores,
-            token_index,
-            padding_mask
-        )
+        # Manual attention computation
+        scale = 1.0 / jnp.sqrt(q.shape[-1])
+        attn_weights = jnp.einsum("bnqd,bnkd->bnqk", q, k) * scale
+        attn_weights = attn_weights + mask_4d
+        attn_weights = jax.nn.softmax(attn_weights, axis=-1)
 
-        # attenuate v values with cumulative scores, so that tokens that are about to be
-        # killed cannot be attended to
-        v = torch.einsum("bnlh,bl -> bnlh", v, cumulative_scores.exp())
+        if not deterministic:
+            attn_weights = nn.Dropout(rate=self.dropout_rate)(attn_weights, deterministic=False)
 
-        # efficient attention using Flash Attention CUDA kernels
-        y = torch.nn.functional.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=mask.unsqueeze(-3).repeat(1,self.n_head,1,1).to(q.dtype),
-            dropout_p=self.dropout if self.training else 0.0,
-            is_causal=False, # since we are giving a custom mask
-        )
-        y = (
-            y.transpose(1, 2).contiguous().view(B, T, C)
-        )  # re-assemble all head outputs side by side
-        # output projection
+        y = jnp.einsum("bnqk,bnkd->bnqd", attn_weights, v)
 
-        y = self.resid_dropout(self.c_proj(y))
+        # Re-assemble all head outputs
+        y = y.transpose(0, 2, 1, 3).reshape(B, T, C)
+
+        # Output projection
+        c_proj_weight = self.param('c_proj_weight',
+                                   nn.initializers.normal(stddev=0.02),
+                                   (C, C))
+        c_proj_bias = self.param('c_proj_bias',
+                                nn.initializers.zeros,
+                                (C,)) if self.config.bias else None
+
+        y = y @ c_proj_weight
+        if c_proj_bias is not None:
+            y = y + c_proj_bias
+
+        if not deterministic:
+            y = nn.Dropout(rate=self.dropout_rate)(y, deterministic=False)
+
         return y
 
-class MLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.gelu = nn.GELU()
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
-        self.dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x):
-        x = self.c_fc(x)
-        x = self.gelu(x)
-        x = self.c_proj(x)
-        x = self.dropout(x)
+class MLP(nn.Module):
+    config: any
+
+    @nn.compact
+    def __call__(self, x, deterministic=False):
+        C = self.config.n_embd
+
+        # First linear layer
+        c_fc_weight = self.param('c_fc_weight',
+                                nn.initializers.normal(stddev=0.02),
+                                (C, 4 * C))
+        c_fc_bias = self.param('c_fc_bias',
+                              nn.initializers.zeros,
+                              (4 * C,)) if self.config.bias else None
+
+        x = x @ c_fc_weight
+        if c_fc_bias is not None:
+            x = x + c_fc_bias
+        x = jax.nn.gelu(x)
+
+        # Second linear layer
+        c_proj_weight = self.param('c_proj_weight',
+                                   nn.initializers.normal(stddev=0.02),
+                                   (4 * C, C))
+        c_proj_bias = self.param('c_proj_bias',
+                                nn.initializers.zeros,
+                                (C,)) if self.config.bias else None
+
+        x = x @ c_proj_weight
+        if c_proj_bias is not None:
+            x = x + c_proj_bias
+
+        if not deterministic:
+            x = nn.Dropout(rate=self.config.dropout)(x, deterministic=False)
+
         return x
 
 
 class Block(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp = MLP(config)
+    config: any
 
-    def forward(self, x, cumulative_scores, token_index, padding_mask=None, layer_num=None):
-        exponentiated_scores = cumulative_scores.exp()
-        x = x + torch.einsum("bl,blh -> blh", exponentiated_scores, self.attn(
-            self.ln_1(x), cumulative_scores, token_index, padding_mask=padding_mask
-        ))
-        x = x + torch.einsum("bl,blh -> blh", exponentiated_scores, self.mlp(self.ln_2(x)))
+    def setup(self):
+        self.ln_1 = LayerNorm(self.config.n_embd, bias=self.config.bias)
+        self.attn = CausalSelfAttention(self.config)
+        self.ln_2 = LayerNorm(self.config.n_embd, bias=self.config.bias)
+        self.mlp = MLP(self.config)
+
+    def __call__(self, x, cumulative_scores, token_index, padding_mask=None,
+                layer_num=None, deterministic=False):
+        exponentiated_scores = jnp.exp(cumulative_scores)
+        x = x + jnp.einsum("bl,blh->blh", exponentiated_scores,
+                          self.attn(self.ln_1(x), cumulative_scores, token_index,
+                                   padding_mask=padding_mask, deterministic=deterministic))
+        x = x + jnp.einsum("bl,blh->blh", exponentiated_scores,
+                          self.mlp(self.ln_2(x), deterministic=deterministic))
         return x
 
 
-class ForkingBlock(Block):
-    def __init__(self, config):
-        super().__init__(config)
+class ForkingBlock(nn.Module):
+    config: any
 
-        self.forking_ln = LayerNorm(config.n_embd, bias=config.bias)
-        self.forking_score = nn.Linear(config.n_embd, 2, bias=False)
-        self.fork_embedding = nn.Parameter(torch.rand(config.n_embd)*
-                                           (1/math.sqrt(config.n_embd)))
-        self.config = config
+    def setup(self):
+        self.ln_1 = LayerNorm(self.config.n_embd, bias=self.config.bias)
+        self.attn = CausalSelfAttention(self.config)
+        self.ln_2 = LayerNorm(self.config.n_embd, bias=self.config.bias)
+        self.mlp = MLP(self.config)
 
-    @staticmethod
-    def gumbel_sigmoid_noise(logits: torch.Tensor) -> torch.Tensor:
-        eps = 3e-4 if logits.dtype == torch.float16 else 1e-10
-        uniform = logits.new_empty([2] + list(logits.shape)).uniform_(eps, 1 - eps)
-
-        noise = -(uniform[1].log() / uniform[0].log() + eps).log()
-        return noise
-    # self.gumbel_sigmoid_noise = gumbel_sigmoid_noise
+        self.forking_ln = LayerNorm(self.config.n_embd, bias=self.config.bias)
 
     @staticmethod
     def clipped_logsigmoid(x, min_val=-20.0):
-        logsigmoid = -F.softplus(-x)
-        return torch.clamp(logsigmoid, min=min_val)
-    # self.clipped_logsigmoid = clipped_logsigmoid
+        logsigmoid = -jax.nn.softplus(-x)
+        return jnp.clip(logsigmoid, a_min=min_val)
 
+    @nn.compact
     def fork(self, x, cumulative_scores, token_index):
-        return self._topk_fork(x, cumulative_scores, token_index)
+        """Top-k forking implementation"""
+        batch_size = cumulative_scores.shape[0]
 
-    def _threshold_fork(self, x, cumulative_scores, token_index):
-        """forking such that any element >0.5 is forked"""
+        # Forking score projection
+        forking_score_weight = self.param('forking_score_weight',
+                                         nn.initializers.normal(stddev=0.02),
+                                         (self.config.n_embd, 2))
 
-        batch_size = len(cumulative_scores)
+        # Compute current layer's forking scores
+        curr_layer_forking_score = self.forking_ln(x) @ forking_score_weight
 
-        # compute current layer's forking scores given residuals
-        curr_layer_forking_score = self.forking_score(self.forking_ln(x))
+        # Update cumulative scores (in log space)
         forking_scores_cum = (
             self.clipped_logsigmoid(curr_layer_forking_score) +
-            cumulative_scores.unsqueeze(-1)
-        ).view(batch_size, -1)
-        forking_scores_cum_for_analysis = forking_scores_cum.clone()
-        forked_token_index = (token_index
-                              .unsqueeze(-1)
-                              .repeat(*([1]*token_index.ndim),2)
-                              .flatten(-2,-1))
-        forking_scores_cum_for_analysis[
-            torch.roll(forked_token_index, -1) != forked_token_index
-        ] = float("+inf") # rightmost token of every token should be 1
-        forking_judgement = (forking_scores_cum_for_analysis.exp() > 0.5)
+            cumulative_scores[:, :, None]
+        ).reshape(batch_size, -1)
+        forking_scores_cum_for_topk = forking_scores_cum
 
-        # set the forking scores of dropped tokens to -inf
-        drop_template = torch.full_like(forking_scores_cum, float("-inf"))
-        new_forking_scores = torch.where(
-            forking_judgement,
-            forking_scores_cum,
-            drop_template
-        ) # compute new cum scores, which is 0 for killed tokens
-
-        # gather each token twice, the leftwards ones are forked
-        exploded_indx = torch.arange(
-            forking_scores_cum_for_analysis.shape[-1]
-        ).to(forking_scores_cum_for_analysis.device).unsqueeze(0).repeat(
-            forking_scores_cum_for_analysis.shape[0], 1
-        )
-        x_to_consider = torch.gather(
-            x, -2, (exploded_indx//2).unsqueeze(-1).expand(-1, -1, x.size(-1))
-        )  # (batch_size, k, n_embd)
-        x_to_consider[:,::2,:] = x_to_consider[:,::2,:] + self.fork_embedding # add fork embeddings to forks
-        new_token_indicies = (exploded_indx//2)
-
-        # finally, optimizations where if an entire batch's one column
-        # is -inf we nuke it as a whole
-        keep_columns = (~(new_forking_scores == float("-inf")).all(dim=-2))
-        x_to_consider = x_to_consider[:, keep_columns, :]
-        new_token_indicies = new_token_indicies[:, keep_columns]
-        new_forking_scores = forking_scores_cum[:, keep_columns]
-
-        # TODO
-        # - implement during attn + block update the -inf mechanism for <0.5
-        # - implement pi controller
-
-        # x = x_to_consider
-        # cumulative_scores = new_forking_scores
-        # token_index = new_token_indicies
-
-        return x_to_consider, new_forking_scores, new_token_indicies
-
-
-    def _topk_fork(self, x, cumulative_scores, token_index):
-        """forking via top-k judgement"""
-        batch_size = len(cumulative_scores)
-
-        # compute current layer's forking scores given residuals
-        curr_layer_forking_score = self.forking_score(self.forking_ln(x))
-
-        # update cumulative scores
-        forking_scores_cum = (
-            self.clipped_logsigmoid(curr_layer_forking_score) +
-            cumulative_scores.unsqueeze(-1)
-        ).view(batch_size, -1)
-        forking_scores_cum_for_topk = forking_scores_cum.clone()
-
-        # we copy the index twice
-        forked_token_index = (token_index
-                              .unsqueeze(-1)
-                              .repeat(*([1]*token_index.ndim),2)
-                              .flatten(-2,-1))
-        forking_scores_cum_for_topk[
-            torch.roll(forked_token_index, -1) != forked_token_index
-        ] = float("+inf") # rightmost token of every token should be 1
-
-        # perform top k, but not as much if the block size is too shallow
-        k = min(
-            self.config.max_block_size,
-            forking_scores_cum_for_topk.size(-1)
+        # Copy token index twice (for original and fork)
+        forked_token_index = (
+            jnp.repeat(token_index[:, :, None], 2, axis=-1)
+            .reshape(batch_size, -1)
         )
 
-        # compute existing and deleted tokens
-        _, top_k_indices = torch.topk(forking_scores_cum_for_topk, k, dim=-1, sorted=True)
-        top_k_indices = top_k_indices.sort().values
+        # Mark rightmost token of each original token with +inf (always keep)
+        rolled = jnp.roll(forked_token_index, -1, axis=-1)
+        is_rightmost = rolled != forked_token_index
+        forking_scores_cum_for_topk = jnp.where(
+            is_rightmost,
+            float("+inf"),
+            forking_scores_cum_for_topk
+        )
 
-        # gather based on the indicies that survived
+        # Perform top-k selection
+        k = min(self.config.max_block_size, forking_scores_cum_for_topk.shape[-1])
+        top_k_values, top_k_indices = lax.top_k(forking_scores_cum_for_topk, k)
+        top_k_indices = jnp.sort(top_k_indices, axis=-1)
+
+        # Gather based on indices that survived
         orig_indices = top_k_indices // 2  # (batch_size, k)
-        is_fork = (top_k_indices % 2) == 0  # (0: orig, 1: fork)
+        is_fork = (top_k_indices % 2) == 0  # 0: fork, 1: orig
 
-        x_to_consider = torch.gather(
-            x, -2, orig_indices.unsqueeze(-1).expand(-1, -1, x.size(-1))
-        )  # (batch_size, k, n_embd)
-        x_to_consider = x_to_consider + (
-            is_fork.unsqueeze(-1).to(self.fork_embedding.dtype) * self.fork_embedding)
+        # Gather x values
+        batch_indices = jnp.arange(batch_size)[:, None]
+        x_to_consider = x[batch_indices, orig_indices, :]  # (batch_size, k, n_embd)
 
-        # gather cumulative scores
-        new_cumulative_scores = forking_scores_cum.gather(-1, top_k_indices) 
-        new_token_indicies = token_index.gather(-1, orig_indices)
+        # Add fork embedding
+        fork_embedding = self.param('fork_embedding',
+                                   lambda rng, shape: jax.random.normal(rng, shape) * (1 / jnp.sqrt(self.config.n_embd)),
+                                   (self.config.n_embd,))
 
-        # x = x_to_consider
-        # cumulative_scores = new_cumulative_scores
-        # token_index = new_token_indicies
+        x_to_consider = x_to_consider + (is_fork[:, :, None].astype(x.dtype) * fork_embedding)
 
-        # return updated values
-        return x_to_consider, new_cumulative_scores, new_token_indicies
+        # Gather cumulative scores and token indices
+        new_cumulative_scores = jnp.take_along_axis(forking_scores_cum, top_k_indices, axis=-1)
+        new_token_indices = jnp.take_along_axis(forked_token_index, orig_indices, axis=-1)
 
+        return x_to_consider, new_cumulative_scores, new_token_indices
 
-    def forward(self, x, cumulative_scores, token_index, padding_mask=None, layer_num=None):
-        # fork!
-        x, cumulative_scores, token_index = self.fork(
-            x,
-            cumulative_scores,
-            token_index
-        )
+    def __call__(self, x, cumulative_scores, token_index, padding_mask=None,
+                layer_num=None, deterministic=False):
+        # Fork first
+        x, cumulative_scores, token_index = self.fork(x, cumulative_scores, token_index)
 
         if not self.config.compiled:
+            # Plotting (host callback for non-jitted mode)
             plot(
                 "forking",
-                cumulative_scores=cumulative_scores.detach(),
-                token_index=token_index.detach(),
+                cumulative_scores=cumulative_scores,
+                token_index=token_index,
                 key=layer_num
             )
 
-        # and now a normal layer
-        return (
-            super().forward(x, cumulative_scores, token_index),
-            cumulative_scores,
-            token_index
-        )
+        # Then normal block forward
+        exponentiated_scores = jnp.exp(cumulative_scores)
+        x = x + jnp.einsum("bl,blh->blh", exponentiated_scores,
+                          self.attn(self.ln_1(x), cumulative_scores, token_index,
+                                   padding_mask=padding_mask, deterministic=deterministic))
+        x = x + jnp.einsum("bl,blh->blh", exponentiated_scores,
+                          self.mlp(self.ln_2(x), deterministic=deterministic))
+
+        return x, cumulative_scores, token_index
+
 
 class Thoughtbubbles(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        assert config.vocab_size is not None
-        assert config.block_size is not None
-        self.config = config
+    config: any
 
-        self.transformer = nn.ModuleDict(
-            dict(
-                wte=nn.Embedding(config.vocab_size, config.n_embd),
-                drop=nn.Dropout(config.dropout),
-                h=nn.ModuleList([
-                    (
-                        ForkingBlock(config)
-                        if layer == "fork" else
-                        Block(config)
-                    ) for layer in config.plan
-                ]),
-                ln_f=LayerNorm(config.n_embd, bias=config.bias),
-            )
+    def setup(self):
+        assert self.config.vocab_size is not None
+        assert self.config.block_size is not None
+
+        # Token embeddings
+        self.wte = nn.Embed(
+            num_embeddings=self.config.vocab_size,
+            features=self.config.n_embd,
+            embedding_init=nn.initializers.normal(stddev=0.02)
         )
-        self.plan = config.plan
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # with weight tying when using torch.compile() some warnings get generated:
-        # "UserWarning: functional_call was passed multiple values for tied weights.
-        # This behavior is deprecated and will be an error in future versions"
-        # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        self.transformer.wte.weight = (
-            self.lm_head.weight
-        )  # https://paperswithcode.com/method/weight-tying
 
-        # init all weights
-        self.apply(self._init_weights)
-        # apply special scaled init to the residual projections, per GPT-2 paper
-        for pn, p in self.named_parameters():
-            if pn.endswith("c_proj.weight"):
-                torch.nn.init.normal_(
-                    p, mean=0.0, std=0.02 / math.sqrt(2 * len(config.plan))
-                )
+        # Transformer blocks
+        self.blocks = [
+            ForkingBlock(self.config) if layer == "fork" else Block(self.config)
+            for layer in self.config.plan
+        ]
 
-        # report number of parameters
-        logger.info("MODEL | number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
+        # Final layer norm
+        self.ln_f = LayerNorm(self.config.n_embd, bias=self.config.bias)
 
-    def get_num_params(self, non_embedding=True):
-        """
-        Return the number of parameters in the model.
-        For non-embedding count (default), the position embeddings get subtracted.
-        The token embeddings would too, except due to the parameter sharing these
-        params are actually used as weights in the final layer, so we include them.
-        """
-        n_params = sum(p.numel() for p in self.parameters())
-        return n_params
+        # Language model head (weight tied with embeddings)
+        # Note: In Flax, weight tying is handled differently
 
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
-    def forward(self, idx, targets=None, padding_mask=None):
-        # mock this
-        # idx = torch.randint(128,(9, self.config.block_size)).cuda()
-        # b, t = idx.size()
-        # pos = torch.arange(0, t, dtype=torch.long).cuda()  # shape (t)
-        # tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
-        # x = self.transformer.drop(tok_emb)
-        # cumulative_scores = torch.zeros_like(idx, dtype=x.dtype).to(x.device)
-        # token_index = pos.repeat(b, 1)
-        #######
-
-        device = idx.device
-        b, t = idx.size()
+    @nn.compact
+    def __call__(self, idx, targets=None, padding_mask=None, deterministic=False):
+        device = idx.device if hasattr(idx, 'device') else None
+        b, t = idx.shape
         assert t <= self.config.block_size, (
             f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         )
-        pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
 
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
-        x = self.transformer.drop(tok_emb)
+        # Token embeddings
+        tok_emb = self.wte(idx)  # (b, t, n_embd)
 
-        # compute cumulative scores and token index, which each forknig block modulates
-        # we initialize cumulative scores to 1 (e^0 = 1)
-        cumulative_scores = torch.zeros_like(idx, dtype=x.dtype).to(x.device)
-        token_index = pos.repeat(b, 1)
+        # Dropout on embeddings
+        if not deterministic:
+            tok_emb = nn.Dropout(rate=self.config.dropout)(tok_emb, deterministic=False)
 
-        # transformer computation
-        for indx, (plan, block) in enumerate(zip(self.plan, self.transformer.h)):
+        x = tok_emb
+
+        # Initialize cumulative scores and token index
+        cumulative_scores = jnp.zeros((b, t), dtype=x.dtype)
+        token_index = jnp.tile(jnp.arange(t), (b, 1))
+
+        # Transformer blocks
+        for indx, (plan, block) in enumerate(zip(self.config.plan, self.blocks)):
             if "fork" in plan:
-                (
-                    x,
-                    cumulative_scores,
-                    token_index
-                ) = block(
-                    x,
-                    cumulative_scores,
-                    token_index,
+                x, cumulative_scores, token_index = block(
+                    x, cumulative_scores, token_index,
                     padding_mask=padding_mask,
-                    layer_num=indx
+                    layer_num=indx,
+                    deterministic=deterministic
                 )
             else:
                 x = block(
-                    x,
-                    cumulative_scores,
-                    token_index,
+                    x, cumulative_scores, token_index,
                     padding_mask=padding_mask,
-                    layer_num=indx
+                    layer_num=indx,
+                    deterministic=deterministic
                 )
-        
-        # normalization + logit average to decode the final logits
-        x = self.transformer.ln_f(x)
-        if x.size(-2) == self.config.block_size:
-            logits = self.lm_head(x)
+
+        # Final layer norm
+        x = self.ln_f(x)
+
+        # Language model head
+        lm_head_weight = self.param('lm_head_weight',
+                                    nn.initializers.normal(stddev=0.02),
+                                    (self.config.n_embd, self.config.vocab_size))
+
+        # Compute logits based on sequence length and averaging method
+        if x.shape[1] == self.config.block_size:
+            logits = x @ lm_head_weight
         else:
             # Apply the selected averaging method
             if self.config.averaging_method == "logit":
-                logits = self.logit_average(self.lm_head(x), cumulative_scores, token_index)
+                logits = self.logit_average(x @ lm_head_weight, cumulative_scores, token_index)
             elif self.config.averaging_method == "residual":
-                logits = self.lm_head(self.residual_average(x, cumulative_scores, token_index))
+                logits = self.residual_average(x, cumulative_scores, token_index) @ lm_head_weight
             elif self.config.averaging_method == "rightmost":
-                logits = self.lm_head(x)[(torch.roll(token_index, -1) != token_index)].view(*tok_emb.shape[:-1], -1)
+                # Take only rightmost token of each original token
+                rolled = jnp.roll(token_index, -1, axis=-1)
+                is_rightmost = rolled != token_index
+                rightmost_x = x[is_rightmost].reshape(b, t, -1)
+                logits = rightmost_x @ lm_head_weight
             else:
-                raise ValueError(f"Invalid averaging_method: {self.config.averaging_method}. Must be one of: 'logit', 'residual', 'rightmost'")
+                raise ValueError(f"Invalid averaging_method: {self.config.averaging_method}")
+
+        # Compute loss if targets provided
         if targets is not None:
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
-            )
+            logits_flat = logits.reshape(-1, logits.shape[-1])
+            targets_flat = targets.reshape(-1)
+
+            # Mask out ignore index (-1)
+            mask = targets_flat != -1
+            logits_masked = logits_flat[mask]
+            targets_masked = targets_flat[mask]
+
+            loss = -jnp.sum(
+                jax.nn.log_softmax(logits_masked, axis=-1) *
+                jax.nn.one_hot(targets_masked, self.config.vocab_size)
+            ) / jnp.sum(mask)
         else:
             loss = None
 
         return logits, loss
 
     def residual_average(self, residuals, cumulative_scores, token_index):
-        # residuals: (batch_size, len, hidden_size)
-        # token_index (batch_size, len)
-        # cumulative_scores: (batch_size, len)
+        """Average residuals weighted by cumulative scores"""
+        scaled_residuals = residuals * jnp.exp(cumulative_scores)[:, :, None]
 
-        # scatter_max, it turns out, is implemented in an extremely
-        # wonky way. so we skip this and hope that we don't underflow
-
-        ####### here's an implementation using scatter_max #######
-        # # max for each group (result: (batch_size, vocab_size))
-        # max_score, _ = scatter_max(cumulative_scores, token_index, dim=-1)
-        # # brodcast into the original tokens
-        # max_score_broadcasted = max_score.gather(
-        #     -1, 
-        #     token_index
-        # ) # (batch_size, forked_len)
-        # # subtract max score and exp, this is the logsumexp trick
-        # shifted_cum_scores = (cumulative_scores - max_score_broadcasted).exp()
-        # scaled_residuals = (residuals * shifted_cum_scores.unsqueeze(-1))
-        
-        # # Sum over each group
-        # summed_residuals = scatter_add(scaled_residuals, token_index, -2)
-
-        # # and add back the max score we subtracted
-        # return (max_score.unsqueeze(-1).exp()*summed_residuals)
-        ####### here's an implementation using scatter_max #######
-
-        scaled_residuals = (residuals * cumulative_scores.exp().unsqueeze(-1))
-        summed_residuals = torch.scatter_add(
-            torch.zeros(
-                *token_index.shape[:-1], self.config.block_size, self.config.n_embd,
-                dtype=scaled_residuals.dtype,
-                device=scaled_residuals.device,
-            ),
-            -2,
-            token_index.unsqueeze(-1).repeat(1, 1, self.config.n_embd),
-            scaled_residuals
+        # Scatter-add to original token positions
+        summed_residuals = jnp.zeros(
+            (residuals.shape[0], self.config.block_size, self.config.n_embd),
+            dtype=residuals.dtype
         )
+
+        # Manual scatter-add implementation
+        for b in range(residuals.shape[0]):
+            for i in range(residuals.shape[1]):
+                idx = token_index[b, i]
+                summed_residuals = summed_residuals.at[b, idx].add(scaled_residuals[b, i])
 
         return summed_residuals
 
+    def get_num_params(self, non_embedding=True):
+        """Return the number of parameters in the model"""
+        # This will be computed after initialization
+        return 0  # Placeholder
 
     def configure_optimizers_adamw(self, weight_decay, learning_rate, betas, device_type):
-        # start with all of the candidate parameters
-        param_dict = {pn: p for pn, p in self.named_parameters()}
-        # filter out those that do not require grad
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-        optim_groups = [
-            {"params": decay_params, "weight_decay": weight_decay},
-            {"params": nodecay_params, "weight_decay": 0.0},
-        ]
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        logger.info(
-            f"MODEL | num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters"
-        )
-        logger.info(
-            f"MODEL | num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters"
-        )
-        # Create AdamW optimizer and use the fused version if it is available
-        fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == "cuda"
-        extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(
-            optim_groups, lr=learning_rate, betas=betas, **extra_args
-        )
-        logger.info(f"OPTIMIZER | using fused AdamW: {use_fused}")
+        """Returns Optax optimizer for AdamW"""
+        import optax
 
+        # Create optimizer chain
+        optimizer = optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.adamw(learning_rate=learning_rate, b1=betas[0], b2=betas[1],
+                       weight_decay=weight_decay)
+        )
+
+        logger.info(f"OPTIMIZER | using AdamW")
         return optimizer
 
     def configure_optimizers_muon(self, distributed=False):
-        hidden_matrix_params = [p for n, p in self.transformer.h.named_parameters() if (p.ndim >= 2 and p.requires_grad and "wte" not in n)]
-        embed_params = [p for n, p in self.named_parameters() if "wte" in n]
-        scalar_params = [p for p in self.parameters() if p.ndim < 2]
+        """Returns Optax optimizer combining Muon and AdamW"""
+        from muon import create_muon_optax
 
-        # sanity check that we got everything
-        assert (set(hidden_matrix_params + embed_params + scalar_params) ==
-                set(self.parameters())), "whoops, looks like we missed some parameters?"
-        assert (len(hidden_matrix_params + embed_params + scalar_params) ==
-                len(list(self.parameters()))), "whoops, looks like we double counted some parameters?"
-
-        # talky talk
-        logger.info(
-            f"MODEL | num decayed AdamW parameter tensors: {len(embed_params)}, with {sum(p.numel() for p in embed_params):,} parameters"
-        )
-        logger.info(
-            f"MODEL | num non-decayed AdamW parameter tensors: {len(scalar_params)}, with {sum(p.numel() for p in scalar_params):,} parameters"
-        )
-        logger.info(
-            f"MODEL | num Muon parameter tensors: {len(hidden_matrix_params)}, with {sum(p.numel() for p in hidden_matrix_params):,} parameters"
-        )
-
-        # form adam groups 
-        parameters = [
-            dict(params=embed_params, lr=self.config.lr*self.config.adamw_embd_scale, weight_decay=self.config.weight_decay,
-                betas=(self.config.beta1, self.config.beta2), use_muon=False),
-            dict(params=scalar_params, lr=self.config.lr*self.config.adamw_scalar_scale,
-                betas=(self.config.beta1, self.config.beta2), use_muon=False, weight_decay=0.0),
-            dict(params=hidden_matrix_params, lr=self.config.lr*self.config.muon_scale,
-                weight_decay=self.config.weight_decay, use_muon=True),
-
-        ]
+        # This will be implemented in muon.py
+        optimizer = create_muon_optax(self.config, distributed=distributed)
 
         logger.info(f"OPTIMIZER | using Muon {'distributed' if distributed else 'single device'}")
-
-        return MuonWithAuxAdam(parameters) if distributed else SingleDeviceMuonWithAuxAdam(parameters)
-
+        return optimizer

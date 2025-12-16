@@ -1,12 +1,15 @@
 """
 strategy.py
 Data Loading Strategy
+
+Converted to JAX for TPU/XLA training.
 """
 
-import torch
+import jax.numpy as jnp
 import random
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
+
 
 class Dataset(ABC):
     def __init__(self, args, path):
@@ -14,13 +17,15 @@ class Dataset(ABC):
         self.path = path
 
     @abstractmethod
-    def get_batch(self, batch_size, split="train", device="cpu", deterministic_key=None):
+    def get_batch(self, batch_size, split="train", deterministic_key=None):
         pass
+
 
 @dataclass
 class Sampling:
     dataset: Dataset
     rate: float
+
 
 class Strategy:
     def __init__(self, args, mixture: list[Sampling]):
@@ -32,7 +37,7 @@ class Strategy:
         if not abs(total_rate - 1.0) < 1e-6:
             raise ValueError("Sampling rates must sum to 1.")
 
-    def get_batch(self, batch_size, split="train", device="cpu", deterministic_key=None):
+    def get_batch(self, batch_size, split="train", deterministic_key=None):
         # Choose a dataset based on the sampling rates
         r = random if deterministic_key is None else random.Random(deterministic_key)
         rand_val = r.random()
@@ -42,23 +47,23 @@ class Strategy:
         for sampling in self.mixture:
             cumulative_rate += sampling.rate
             if rand_val < cumulative_rate:
-                batch = sampling.dataset.get_batch(batch_size, split, device, deterministic_key)
+                batch = sampling.dataset.get_batch(batch_size, split, deterministic_key)
                 break
         else:
             # Fallback (should not reach here if rates sum to 1)
-            batch = self.mixture[-1].dataset.get_batch(batch_size, split, device, deterministic_key)
+            batch = self.mixture[-1].dataset.get_batch(batch_size, split, deterministic_key)
 
-        x,y = batch
+        x, y = batch
 
         # validate batch, if any rows have zeros then resample
         cut_batch_x = x[(~(x == 0).all(axis=-1))]
         cut_batch_y = y[(~(x == 0).all(axis=-1))]
         if cut_batch_x.shape[0] < batch_size:
             x_addn, y_addn = self.get_batch(
-                batch_size - cut_batch_x.shape[0], split, device,
+                batch_size - cut_batch_x.shape[0], split,
                 deterministic_key+1 if deterministic_key is not None else None
             )
-            x = torch.cat([cut_batch_x, x_addn], dim=0)
-            y = torch.cat([cut_batch_y, y_addn], dim=0)
+            x = jnp.concatenate([cut_batch_x, x_addn], axis=0)
+            y = jnp.concatenate([cut_batch_y, y_addn], axis=0)
 
-        return (x,y)
+        return (x, y)

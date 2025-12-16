@@ -1,6 +1,8 @@
 """
 pmd.py
 "Poor Man's Dataloader" Datasets
+
+Converted to JAX for TPU/XLA training.
 """
 # common standard library utilities
 import os
@@ -19,20 +21,8 @@ from argparse import Namespace
 import numpy as np
 import pandas as pd
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import SequentialLR, LinearLR
-
-from torch.utils.data import DataLoader, Dataset
-
-# huggingface
-from transformers import AutoConfig, AutoModel, AutoTokenizer
-
-# MLOps
-import wandb
+import jax
+import jax.numpy as jnp
 
 # logging
 from loguru import logger
@@ -45,6 +35,7 @@ tqdm.pandas()
 
 from flywheel.strategy import Dataset
 
+
 class MemmapDataset(Dataset):
 
     def __init__(self, args, path, has_val=True):
@@ -53,7 +44,7 @@ class MemmapDataset(Dataset):
         self.has_val = has_val
         super().__init__(args, path)
 
-    def get_batch(self, batch_size, split="train", device="cpu", deterministic_key=None):
+    def get_batch(self, batch_size, split="train", deterministic_key=None):
         """get batches based on the "poor man's dataloader" strategy"""
 
         if not self.has_val and split == "val":
@@ -83,29 +74,27 @@ class MemmapDataset(Dataset):
                     os.path.join(data_dir, "val.bin"), dtype=np.uint16, mode="r"
                 )
                 self.cache_val = data
+
         if deterministic_key:
             portion = batch_size * block_size
-            ix = torch.arange(
+            ix = np.arange(
                 deterministic_key * portion, (deterministic_key + 1) * portion, block_size
             )
         else:
-            ix = torch.randint(len(data) - block_size, (batch_size,))
-        x = torch.stack(
-            [torch.from_numpy((data[i : i + block_size]).astype(np.int64)) for i in ix]
+            ix = np.random.randint(0, len(data) - block_size, size=(batch_size,))
+
+        x = np.stack(
+            [data[i : i + block_size].astype(np.int64) for i in ix]
         )
-        y = torch.stack(
+        y = np.stack(
             [
-                torch.from_numpy((data[i + 1 : i + 1 + block_size]).astype(np.int64))
+                data[i + 1 : i + 1 + block_size].astype(np.int64)
                 for i in ix
             ]
         )
-        if device != "cpu":
-            # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-            x, y = (
-                x.pin_memory().to(device, non_blocking=True),
-                y.pin_memory().to(device, non_blocking=True),
-            )
-        else:
-            x, y = x.to(device), y.to(device)
-        return x, y
 
+        # Convert to JAX arrays
+        x = jnp.array(x)
+        y = jnp.array(y)
+
+        return x, y

@@ -15,9 +15,8 @@ from argparse import Namespace
 import numpy as np
 import pandas as pd
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import jax
+import jax.numpy as jnp
 
 # huggingface
 import logging
@@ -85,24 +84,28 @@ def plot_forking(data):
     # extract a sorted ordering of layers' forking scores
     data = sort_by_key(data)
 
-    pad_max = max([i[0].size(-1) for i in data["cumulative_scores"]])
+    # Convert JAX arrays to numpy for plotting
+    def to_numpy(x):
+        if isinstance(x, jnp.ndarray):
+            return np.array(x)
+        return x
+
+    pad_max = max([to_numpy(i[0]).shape[-1] for i in data["cumulative_scores"]])
     cum_scores_logits_unnorm = [
-        i for i,j in zip(data["cumulative_scores"],data["token_index"])
+        to_numpy(i) for i,j in zip(data["cumulative_scores"],data["token_index"])
     ]
-    cum_scores_unnorm = torch.stack([torch.tensor(i[0].exp().tolist()+[0.0]*(pad_max-i[0].size(-1))) for i in cum_scores_logits_unnorm])
+    cum_scores_unnorm = np.stack([np.concatenate([np.exp(i[0]), np.zeros(pad_max-i[0].shape[-1])]) for i in cum_scores_logits_unnorm])
 
     # we copy down the token index to calculate soft and large scores
-    token_index = torch.stack([torch.tensor(i[0].tolist()+[0]*
-                                            (pad_max-i[0].size(-1)))
-                               for i in data["token_index"]]).detach()
-    token_index_ignore = torch.stack([torch.tensor([False for _ in i[0].tolist()]+[True]*
-                                                 (pad_max-i[0].size(-1)))
-                               for i in data["token_index"]]).detach()
+    token_index = np.stack([np.concatenate([to_numpy(i[0]), np.zeros(pad_max-to_numpy(i[0]).shape[-1], dtype=np.int32)])
+                               for i in data["token_index"]])
+    token_index_ignore = np.stack([np.concatenate([np.zeros(to_numpy(i[0]).shape[-1], dtype=bool), np.ones(pad_max-to_numpy(i[0]).shape[-1], dtype=bool)])
+                               for i in data["token_index"]])
 
 
     fig2, ax = plt.subplots(figsize=FIGSIZE)
-    scores_unnorm = cum_scores_unnorm.cpu().detach()
-    sns.heatmap(scores_unnorm.float(), 
+    scores_unnorm = cum_scores_unnorm
+    sns.heatmap(scores_unnorm.astype(np.float32), 
                 cmap='viridis',
                 xticklabels='auto',
                 yticklabels='auto',
@@ -115,7 +118,7 @@ def plot_forking(data):
 
 
     fig3, ax = plt.subplots(figsize=FIGSIZE)
-    sns.heatmap(token_index.cpu().float(), 
+    sns.heatmap(token_index.astype(np.float32), 
                 cmap='viridis',
                 xticklabels='auto',
                 yticklabels='auto',
@@ -127,39 +130,40 @@ def plot_forking(data):
     plt.close(fig3) # remember to call close against the figure!
 
     # compute the number of tokens / forks that exist
-    sum_per_token = torch.ones_like(token_index)
+    sum_per_token = np.ones_like(token_index)
     sum_per_token[token_index_ignore] = 0
-    block = token_index.max().cpu().item()+1
-    sum_per_token = torch.scatter_add(
-        torch.zeros(
-            *token_index.shape[:-1], block,
-            dtype=token_index.dtype,
-            device=token_index.device,
-        ),
-        -1,
-        token_index,
-        sum_per_token
+    block = int(token_index.max()) + 1
+
+    # Manual scatter-add implementation for numpy
+    sum_per_token_result = np.zeros(
+        (*token_index.shape[:-1], block),
+        dtype=token_index.dtype
     )
-    soft_score_per_token = torch.scatter_add(
-        torch.zeros(
-            *token_index.shape[:-1], block,
-            dtype=token_index.dtype,
-            device=token_index.device,
-        ),
-        -1,
-        token_index,
-        cum_scores_unnorm
+    for b in range(token_index.shape[0]):
+        for i in range(token_index.shape[1]):
+            if not token_index_ignore[b, i]:
+                idx = token_index[b, i]
+                sum_per_token_result[b, idx] += sum_per_token[b, i]
+    sum_per_token = sum_per_token_result
+
+    soft_score_per_token_result = np.zeros(
+        (*token_index.shape[:-1], block),
+        dtype=cum_scores_unnorm.dtype
     )
+    for b in range(token_index.shape[0]):
+        for i in range(token_index.shape[1]):
+            if not token_index_ignore[b, i]:
+                idx = token_index[b, i]
+                soft_score_per_token_result[b, idx] += cum_scores_unnorm[b, i]
+    soft_score_per_token = soft_score_per_token_result
 
     fig4, ax = plt.subplots(figsize=FIGSIZE)
 
     # otherwise something really funny indeed happens
-    # which is that all the padding gets plaed at the beginning
-    sum_per_token = sum_per_token.detach()
+    # which is that all the padding gets placed at the beginning
     sum_per_token[0][0] = 0
 
-    sum_per_token = sum_per_token.cpu().detach()
-    sns.heatmap(sum_per_token.float(), 
+    sns.heatmap(sum_per_token.astype(np.float32), 
                 cmap='viridis',
                 xticklabels='auto',
                 yticklabels='auto',
@@ -174,8 +178,7 @@ def plot_forking(data):
     plt.close(fig4) # remember to call close against the figure!
 
     fig5, ax = plt.subplots(figsize=FIGSIZE)
-    soft_score_per_token = soft_score_per_token.cpu().detach()
-    sns.heatmap(soft_score_per_token.float(), 
+    sns.heatmap(soft_score_per_token.astype(np.float32), 
                 cmap='viridis',
                 xticklabels='auto',
                 yticklabels='auto',

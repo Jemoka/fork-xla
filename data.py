@@ -15,20 +15,7 @@ from argparse import Namespace
 import numpy as np
 import pandas as pd
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import SequentialLR, LinearLR
-
-from torch.utils.data import DataLoader, Dataset
-
-# huggingface
-from transformers import AutoConfig, AutoModel, AutoTokenizer
-
-# MLOps
-import wandb
+import jax.numpy as jnp
 
 # logging
 from loguru import logger
@@ -45,9 +32,12 @@ cached_memmap_val = None
 
 
 def get_batch_pmd(
-    args, batch_size, split="train", device="cpu", deterministic_key=None
+    args, batch_size, split="train", deterministic_key=None
 ):
-    """get batches based on the "poor man's dataloader" strategy"""
+    """get batches based on the "poor man's dataloader" strategy
+
+    Converted to JAX for TPU/XLA training.
+    """
     global cached_memmap_train, cached_memmap_val
 
     # args is the run configuration + config is the GPT config
@@ -72,30 +62,29 @@ def get_batch_pmd(
                 os.path.join(data_dir, "val.bin"), dtype=np.uint16, mode="r"
             )
             cached_memmap_val = data
+
     if deterministic_key:
         portion = batch_size * block_size
-        ix = torch.arange(
+        ix = np.arange(
             deterministic_key * portion, (deterministic_key + 1) * portion, block_size
         )
     else:
-        ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack(
-        [torch.from_numpy((data[i : i + block_size]).astype(np.int64)) for i in ix]
+        ix = np.random.randint(0, len(data) - block_size, size=(batch_size,))
+
+    x = np.stack(
+        [data[i : i + block_size].astype(np.int64) for i in ix]
     )
-    y = torch.stack(
+    y = np.stack(
         [
-            torch.from_numpy((data[i + 1 : i + 1 + block_size]).astype(np.int64))
+            data[i + 1 : i + 1 + block_size].astype(np.int64)
             for i in ix
         ]
     )
-    if device != "cpu":
-        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y = (
-            x.pin_memory().to(device, non_blocking=True),
-            y.pin_memory().to(device, non_blocking=True),
-        )
-    else:
-        x, y = x.to(device), y.to(device)
+
+    # Convert to JAX arrays
+    x = jnp.array(x)
+    y = jnp.array(y)
+
     return x, y
 
 
@@ -103,14 +92,13 @@ def get_batch(
     args,
     batch_size,
     split="train",
-    device="cpu",
     deterministic_key=None,
     return_label=False,
 ):
     if "openwebtext" in args.data_dir or "pes2o" in args.data_dir:
-        return get_batch_pmd(args, batch_size, split, device, deterministic_key)
+        return get_batch_pmd(args, batch_size, split, deterministic_key)
     else:
         logger.warning(
             "We can't infer what the data format is supposed to be; assuming a poor man's dataloader!"
         )
-        return get_batch_pmd(args, batch_size, split, device, deterministic_key)
+        return get_batch_pmd(args, batch_size, split, deterministic_key)
