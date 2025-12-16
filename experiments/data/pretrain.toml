@@ -1,0 +1,18 @@
+# calculations assumes training at 200B (200000000000) tokens
+# WSD schedule (i.e. so we can get intermediate checkpoints)
+
+[[dataset]]
+type = "memmap"
+path = "/sphinx/u/houjun/dataset/openwebtext"
+weight = 0.03 # < 1 epoch on OWT, 6B tokens / 9B tokens
+
+[[dataset]]
+type = "memmap"
+path = "/sphinx/u/houjun/dataset/pes2o_large"
+weight = 0.3 # 1.5 epochs on peS2o, 60B tokens / 42B tokens
+has_val = false
+
+[[dataset]]
+type = "memmap"
+path = "/sphinx/u/houjun/dataset/fineweb"
+weight = 0.67 # ~0.6 epochs on FineWeb webtext, 134B tokens / 250B+ tokens
