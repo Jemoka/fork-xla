@@ -12,7 +12,6 @@ import itertools
 import json
 import wandb
 import random
-import torch
 
 from utils import read_lines_from_zst
 from collections import defaultdict
