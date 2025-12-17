@@ -374,21 +374,55 @@ def download(url: str, dest: Optional[str] = None, extract: bool=True, ignore_if
 
 
 zstd = None
-def read_lines_from_zst(url: str):
+def read_lines_from_zst(url: str, max_retries: int = 5, initial_backoff: float = 1.0):
     # from https://stackoverflow.com/questions/61067762/how-to-extract-zst-files-into-a-pandas-dataframe
+    import itertools
     global zstd
     if zstd is None:
         import zstandard as zstd
 
     urls = UrlStream(url)
-
     DCTX = zstd.ZstdDecompressor(max_window_size=2**31)
-    with (
-        zstd.open(urls, mode='rb', dctx=DCTX) as zfh,
-        io.TextIOWrapper(zfh) as iofh
-    ):
-        for line in iofh:
+
+    iterator = None
+    retry_count = 0
+    backoff = initial_backoff
+    lines_yielded = 0  # Track how many lines we've successfully yielded
+
+    while True:
+        try:
+            if iterator is None:
+                zfh = zstd.open(urls, mode='rb', dctx=DCTX)
+                iofh = io.TextIOWrapper(zfh)
+                iterator = iter(iofh)
+                # Skip lines we've already yielded (efficient with islice)
+                if lines_yielded > 0:
+                    for _ in itertools.islice(iterator, lines_yielded):
+                        pass
+
+            line = next(iterator)
+            retry_count = 0  # Reset retry count on success
+            backoff = initial_backoff  # Reset backoff on success
+            lines_yielded += 1
             yield line
+
+        except StopIteration:
+            break
+        except Exception as e:
+            # Catch ZstdError and other decompression errors
+            if 'ZstdError' in type(e).__name__ or isinstance(e, (IOError, OSError)):
+                retry_count += 1
+                if retry_count >= max_retries:
+                    logger.error(f"Failed to read from {url} after {max_retries} retries")
+                    raise
+                logger.warning(f"ZstdError encountered at line {lines_yielded}, retry {retry_count}/{max_retries} after {backoff}s")
+                time.sleep(backoff)
+                backoff *= 2  # Exponential backoff
+                # Reset the iterator and we'll skip to where we were
+                iterator = None
+                urls = UrlStream(url)
+            else:
+                raise
 
 
 def parse_dataset_spec(path_to_spec: str, args):
