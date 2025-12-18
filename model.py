@@ -7,8 +7,6 @@ References:
 https://github.com/openai/gpt-2/blob/master/src/model.py
 2) huggingface/transformers PyTorch implementation:
 https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
-
-Converted to JAX/Flax/Haliax for TPU/XLA training.
 """
 
 import math
@@ -22,26 +20,8 @@ from jax import lax
 import flax.linen as nn
 from flax import struct
 
-import haliax as hax
-from haliax import Axis, NamedArray
-from haliax.nn import LayerNorm as HaxLayerNorm
-
 from loguru import logger
 from utils import plot
-
-
-# Define axis names for Haliax
-@struct.dataclass
-class AxesConfig:
-    Batch: Axis
-    Pos: Axis
-    MaxPos: Axis
-    Embed: Axis
-    Heads: Axis
-    HeadDim: Axis
-    Vocab: Axis
-    Mlp: Axis
-
 
 class RotaryPosEncoding:
     """RoPE implementation by Róbert Csordás, converted to JAX"""
