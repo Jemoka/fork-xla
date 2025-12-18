@@ -174,6 +174,9 @@ class CausalSelfAttention(nn.Module):
         )
 
     def __call__(self, x, cumulative_scores, token_index, padding_mask=None, deterministic=False):
+        # sometimes peolpe do float32 attn, idk
+        ATTN_DTYPE = jnp.bfloat16 
+
         B, T, C = x.shape
 
         # QKV projection
@@ -206,20 +209,20 @@ class CausalSelfAttention(nn.Module):
         mask_key = (q.shape[-2], k.shape[-2])
         causal_mask = jnp.tril(jnp.ones((q.shape[-2], k.shape[-2]), dtype=jnp.bool_))
         causal_mask = jnp.where(causal_mask,
-                                jnp.zeros_like(causal_mask, dtype=jnp.float32),
-                                jnp.full_like(causal_mask, float("-inf"), dtype=jnp.float32))
+                                jnp.zeros_like(causal_mask, dtype=ATTN_DTYPE),
+                                jnp.full_like(causal_mask, float("-inf"), dtype=ATTN_DTYPE))
         causal_mask = jnp.repeat(causal_mask[None, :, :], B, axis=0)
         mask = causal_mask
 
         # Add padding mask if necessary
         if padding_mask is not None:
             padding_mask = jnp.take_along_axis(padding_mask, token_index, axis=1)
-            padding_mask_fl = padding_mask.astype(jnp.float32)
+            padding_mask_fl = padding_mask.astype(ATTN_DTYPE)
             padding_mask_outer = padding_mask_fl[:, :, None] @ padding_mask_fl[:, None, :]
             padding_mask_additive = jnp.where(
                 padding_mask_outer.astype(jnp.bool_),
-                jnp.zeros_like(padding_mask_outer, dtype=jnp.float32),
-                jnp.full_like(padding_mask_outer, float("-inf"), dtype=jnp.float32)
+                jnp.zeros_like(padding_mask_outer, dtype=ATTN_DTYPE),
+                jnp.full_like(padding_mask_outer, float("-inf"), dtype=ATTN_DTYPE)
             )
             mask = mask + padding_mask_additive
 
@@ -230,10 +233,11 @@ class CausalSelfAttention(nn.Module):
         mask_4d = jnp.repeat(mask[:, None, :, :], self.n_head, axis=1)
 
         # Use JAX's optimized attention
+        # expects (batch x seq x heads x hidden), so we permute back from (b, nH, T, hs)
         y = jax.nn.dot_product_attention(
-            query=q,
-            key=k,
-            value=v,
+            query=q.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
+            key=k.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
+            value=v.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
             bias=mask_4d
         )
 
@@ -241,7 +245,7 @@ class CausalSelfAttention(nn.Module):
             y = nn.Dropout(rate=self.dropout_rate)(y, deterministic=False)
 
         # Re-assemble all head outputs
-        y = y.transpose(0, 2, 1, 3).reshape(B, T, C)
+        y = y.reshape(B, T, C)
 
         # Output projection
         y = self.c_proj(y)
@@ -419,15 +423,6 @@ class Thoughtbubbles(nn.Module):
         assert self.config.vocab_size is not None
         assert self.config.block_size is not None
 
-        # Token embeddings
-        self.wte = nn.Embed(
-            num_embeddings=self.config.vocab_size,
-            features=self.config.n_embd,
-            embedding_init=nn.initializers.normal(stddev=0.02),
-            param_dtype=jnp.float32,
-            dtype=jnp.bfloat16
-        )
-
         # Transformer blocks
         self.blocks = [
             ForkingBlock(self.config) if layer == "fork" else Block(self.config)
@@ -448,13 +443,13 @@ class Thoughtbubbles(nn.Module):
         # Shared token embedding table: (vocab, d_model)
         wte = self.param(
             "wte",
-            nn.initializers.normal(stddev=1.0),
+            nn.initializers.normal(stddev=0.02),
             (self.config.vocab_size, self.config.n_embd),
-            jnp.bfloat16
+            jnp.float32
         )
 
         # Token embeddings
-        tok_emb = jnp.take(wte, idx, axis=0)  # (b, t, n_embd)
+        tok_emb = jnp.take(wte, idx, axis=0).astype(jnp.bfloat16)  # (b, t, n_embd)
 
         # Dropout on embeddings
         if not deterministic:
@@ -488,13 +483,13 @@ class Thoughtbubbles(nn.Module):
 
         # Compute logits based on sequence length and averaging method
         if x.shape[1] == self.config.block_size:
-            logits = jnp.einsum("blh,vh->blv", x, wte)
+            logits = jnp.einsum("blh,vh->blv", x, wte.astype(jnp.bfloat16))
         else:
             # Apply the selected averaging method
             if self.config.averaging_method == "logit":
-                logits = self.logit_average(jnp.einsum("blh,vh->blv", x, wte), cumulative_scores, token_index)
+                logits = self.logit_average(jnp.einsum("blh,vh->blv", x, wte.astype(jnp.bfloat16)), cumulative_scores, token_index)
             elif self.config.averaging_method == "residual":
-                logits = jnp.einsum("blh,vh->blv", self.residual_average(x, cumulative_scores, token_index), wte)
+                logits = jnp.einsum("blh,vh->blv", self.residual_average(x, cumulative_scores, token_index), wte.astype(jnp.bfloat16))
             elif self.config.averaging_method == "rightmost":
                 # Take only rightmost token of each original token
                 rolled = jnp.roll(token_index, -1, axis=-1)
