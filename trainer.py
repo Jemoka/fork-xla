@@ -17,6 +17,8 @@ import numpy as np
 import pandas as pd
 
 import jax
+from jax import config
+config.update("jax_default_matmul_precision", "bfloat16")
 import jax.numpy as jnp
 from jax import random as jax_random
 import flax

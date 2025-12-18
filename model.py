@@ -118,20 +118,28 @@ class LayerNorm(nn.Module):
     """LayerNorm but with an optional bias. JAX/Flax version"""
     ndim: int
     bias: bool
+    dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
     def __call__(self, x):
         weight = self.param('weight', nn.initializers.ones, (self.ndim,))
         bias = self.param('bias', nn.initializers.zeros, (self.ndim,)) if self.bias else None
 
-        mean = jnp.mean(x, axis=-1, keepdims=True)
-        var = jnp.var(x, axis=-1, keepdims=True)
-        x_norm = (x - mean) / jnp.sqrt(var + 1e-5)
+        # Cast to float32 for numerical stability
+        x_f32 = x.astype(jnp.float32)
+        mean = jnp.mean(x_f32, axis=-1, keepdims=True)
+        var = jnp.var(x_f32, axis=-1, keepdims=True)
+        x_norm = (x_f32 - mean) / jnp.sqrt(var + 1e-5)
+
+        # Cast back to compute dtype
+        x_norm = x_norm.astype(self.dtype)
+        weight_cast = weight.astype(self.dtype)
 
         if bias is not None:
-            return weight * x_norm + bias
+            bias_cast = bias.astype(self.dtype)
+            return weight_cast * x_norm + bias_cast
         else:
-            return weight * x_norm
+            return weight_cast * x_norm
 
 
 class CausalSelfAttention(nn.Module):
@@ -147,22 +155,29 @@ class CausalSelfAttention(nn.Module):
         # Initialize RoPE
         self.rope = RotaryPosEncoding(self.config.n_embd // self.config.n_head, seq_dim=-2)
 
-    @nn.compact
+        # QKV projection
+        self.c_attn = nn.Dense(
+            3 * self.n_embd,
+            use_bias=self.config.bias,
+            kernel_init=jax.nn.initializers.xavier_normal(),
+            param_dtype=jnp.float32,
+            dtype=jnp.bfloat16
+        )
+
+        # Output projection
+        self.c_proj = nn.Dense(
+            self.n_embd,
+            use_bias=self.config.bias,
+            kernel_init=jax.nn.initializers.xavier_normal(),
+            param_dtype=jnp.float32,
+            dtype=jnp.bfloat16
+        )
+
     def __call__(self, x, cumulative_scores, token_index, padding_mask=None, deterministic=False):
         B, T, C = x.shape
 
         # QKV projection
-        c_attn_weight = self.param('c_attn_weight',
-                                   nn.initializers.normal(stddev=0.02),
-                                   (C, 3 * C))
-        c_attn_bias = self.param('c_attn_bias',
-                                nn.initializers.zeros,
-                                (3 * C,)) if self.config.bias else None
-
-        qkv = x @ c_attn_weight
-        if c_attn_bias is not None:
-            qkv = qkv + c_attn_bias
-
+        qkv = self.c_attn(x)
         q, k, v = jnp.split(qkv, 3, axis=2)
 
         # Reshape for multi-head attention
@@ -214,31 +229,22 @@ class CausalSelfAttention(nn.Module):
         # Scaled dot-product attention
         mask_4d = jnp.repeat(mask[:, None, :, :], self.n_head, axis=1)
 
-        # Manual attention computation
-        scale = 1.0 / jnp.sqrt(q.shape[-1])
-        attn_weights = jnp.einsum("bnqd,bnkd->bnqk", q, k) * scale
-        attn_weights = attn_weights + mask_4d
-        attn_weights = jax.nn.softmax(attn_weights, axis=-1)
+        # Use JAX's optimized attention
+        y = jax.nn.dot_product_attention(
+            query=q,
+            key=k,
+            value=v,
+            bias=mask_4d
+        )
 
         if not deterministic:
-            attn_weights = nn.Dropout(rate=self.dropout_rate)(attn_weights, deterministic=False)
-
-        y = jnp.einsum("bnqk,bnkd->bnqd", attn_weights, v)
+            y = nn.Dropout(rate=self.dropout_rate)(y, deterministic=False)
 
         # Re-assemble all head outputs
         y = y.transpose(0, 2, 1, 3).reshape(B, T, C)
 
         # Output projection
-        c_proj_weight = self.param('c_proj_weight',
-                                   nn.initializers.normal(stddev=0.02),
-                                   (C, C))
-        c_proj_bias = self.param('c_proj_bias',
-                                nn.initializers.zeros,
-                                (C,)) if self.config.bias else None
-
-        y = y @ c_proj_weight
-        if c_proj_bias is not None:
-            y = y + c_proj_bias
+        y = self.c_proj(y)
 
         if not deterministic:
             y = nn.Dropout(rate=self.dropout_rate)(y, deterministic=False)
@@ -249,34 +255,30 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     config: any
 
-    @nn.compact
-    def __call__(self, x, deterministic=False):
-        C = self.config.n_embd
-
+    def setup(self):
         # First linear layer
-        c_fc_weight = self.param('c_fc_weight',
-                                nn.initializers.normal(stddev=0.02),
-                                (C, 4 * C))
-        c_fc_bias = self.param('c_fc_bias',
-                              nn.initializers.zeros,
-                              (4 * C,)) if self.config.bias else None
-
-        x = x @ c_fc_weight
-        if c_fc_bias is not None:
-            x = x + c_fc_bias
-        x = jax.nn.gelu(x)
+        self.c_fc = nn.Dense(
+            4 * self.config.n_embd,
+            use_bias=self.config.bias,
+            kernel_init=jax.nn.initializers.xavier_normal(),
+            param_dtype=jnp.float32,
+            dtype=jnp.bfloat16
+        )
 
         # Second linear layer
-        c_proj_weight = self.param('c_proj_weight',
-                                   nn.initializers.normal(stddev=0.02),
-                                   (4 * C, C))
-        c_proj_bias = self.param('c_proj_bias',
-                                nn.initializers.zeros,
-                                (C,)) if self.config.bias else None
+        self.c_proj = nn.Dense(
+            self.config.n_embd,
+            use_bias=self.config.bias,
+            kernel_init=jax.nn.initializers.xavier_normal(),
+            param_dtype=jnp.float32,
+            dtype=jnp.bfloat16
+        )
 
-        x = x @ c_proj_weight
-        if c_proj_bias is not None:
-            x = x + c_proj_bias
+    @nn.compact
+    def __call__(self, x, deterministic=False):
+        x = self.c_fc(x)
+        x = jax.nn.gelu(x)
+        x = self.c_proj(x)
 
         if not deterministic:
             x = nn.Dropout(rate=self.config.dropout)(x, deterministic=False)
@@ -315,6 +317,15 @@ class ForkingBlock(nn.Module):
 
         self.forking_ln = LayerNorm(self.config.n_embd, bias=self.config.bias)
 
+        # Forking score projection
+        self.forking_score = nn.Dense(
+            2,
+            use_bias=False,
+            kernel_init=jax.nn.initializers.xavier_normal(),
+            param_dtype=jnp.float32,
+            dtype=jnp.bfloat16
+        )
+
     @staticmethod
     def clipped_logsigmoid(x, min_val=-20.0):
         logsigmoid = -jax.nn.softplus(-x)
@@ -325,13 +336,8 @@ class ForkingBlock(nn.Module):
         """Top-k forking implementation"""
         batch_size = cumulative_scores.shape[0]
 
-        # Forking score projection
-        forking_score_weight = self.param('forking_score_weight',
-                                         nn.initializers.normal(stddev=0.02),
-                                         (self.config.n_embd, 2))
-
         # Compute current layer's forking scores
-        curr_layer_forking_score = self.forking_ln(x) @ forking_score_weight
+        curr_layer_forking_score = self.forking_score(self.forking_ln(x))
 
         # Update cumulative scores (in log space)
         forking_scores_cum = (
@@ -373,7 +379,7 @@ class ForkingBlock(nn.Module):
                                    lambda rng, shape: jax.random.normal(rng, shape) * (1 / jnp.sqrt(self.config.n_embd)),
                                    (self.config.n_embd,))
 
-        x_to_consider = x_to_consider + (is_fork[:, :, None].astype(x.dtype) * fork_embedding)
+        x_to_consider = x_to_consider + (is_fork[:, :, None].astype(x.dtype) * fork_embedding.astype(jnp.bfloat16))
 
         # Gather cumulative scores and token indices
         new_cumulative_scores = jnp.take_along_axis(forking_scores_cum, top_k_indices, axis=-1)
@@ -417,7 +423,9 @@ class Thoughtbubbles(nn.Module):
         self.wte = nn.Embed(
             num_embeddings=self.config.vocab_size,
             features=self.config.n_embd,
-            embedding_init=nn.initializers.normal(stddev=0.02)
+            embedding_init=nn.initializers.normal(stddev=0.02),
+            param_dtype=jnp.float32,
+            dtype=jnp.bfloat16
         )
 
         # Transformer blocks
@@ -429,9 +437,6 @@ class Thoughtbubbles(nn.Module):
         # Final layer norm
         self.ln_f = LayerNorm(self.config.n_embd, bias=self.config.bias)
 
-        # Language model head (weight tied with embeddings)
-        # Note: In Flax, weight tying is handled differently
-
     @nn.compact
     def __call__(self, idx, targets=None, padding_mask=None, deterministic=False):
         device = idx.device if hasattr(idx, 'device') else None
@@ -440,8 +445,16 @@ class Thoughtbubbles(nn.Module):
             f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         )
 
+        # Shared token embedding table: (vocab, d_model)
+        wte = self.param(
+            "wte",
+            nn.initializers.normal(stddev=1.0),
+            (self.vocab_size, self.d_model),
+            self.param_dtype,
+        ).astype(jnp.bfloat16)
+
         # Token embeddings
-        tok_emb = self.wte(idx)  # (b, t, n_embd)
+        tok_emb = jnp.take(wte, idx, axis=0)  # (b, t, n_embd)
 
         # Dropout on embeddings
         if not deterministic:
@@ -473,32 +486,29 @@ class Thoughtbubbles(nn.Module):
         # Final layer norm
         x = self.ln_f(x)
 
-        # Language model head
-        lm_head_weight = self.param('lm_head_weight',
-                                    nn.initializers.normal(stddev=0.02),
-                                    (self.config.n_embd, self.config.vocab_size))
-
         # Compute logits based on sequence length and averaging method
         if x.shape[1] == self.config.block_size:
-            logits = x @ lm_head_weight
+            logits = jnp.einsum("blh,vh->blv", x, wte)
         else:
             # Apply the selected averaging method
             if self.config.averaging_method == "logit":
-                logits = self.logit_average(x @ lm_head_weight, cumulative_scores, token_index)
+                logits = self.logit_average(jnp.einsum("blh,vh->blv", x, wte), cumulative_scores, token_index)
             elif self.config.averaging_method == "residual":
-                logits = self.residual_average(x, cumulative_scores, token_index) @ lm_head_weight
+                logits = jnp.einsum("blh,vh->blv", self.residual_average(x, cumulative_scores, token_index), wte)
             elif self.config.averaging_method == "rightmost":
                 # Take only rightmost token of each original token
                 rolled = jnp.roll(token_index, -1, axis=-1)
                 is_rightmost = rolled != token_index
                 rightmost_x = x[is_rightmost].reshape(b, t, -1)
-                logits = rightmost_x @ lm_head_weight
+                logits = self.lm_head(rightmost_x)
             else:
                 raise ValueError(f"Invalid averaging_method: {self.config.averaging_method}")
 
         # Compute loss if targets provided
         if targets is not None:
-            logits_flat = logits.reshape(-1, logits.shape[-1])
+            # Cast logits to float32 for numerical stability
+            logits_f32 = logits.astype(jnp.float32)
+            logits_flat = logits_f32.reshape(-1, logits_f32.shape[-1])
             targets_flat = targets.reshape(-1)
 
             # Mask out ignore index (-1)
@@ -506,6 +516,7 @@ class Thoughtbubbles(nn.Module):
             logits_masked = logits_flat
             targets_masked = jnp.where(mask, targets_flat, 0)
 
+            # Compute cross entropy in float32
             loss = -jnp.sum(
                 (jax.nn.log_softmax(logits_masked, axis=-1) *
                  jax.nn.one_hot(targets_masked, self.config.vocab_size))*mask[:,None]

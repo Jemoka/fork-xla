@@ -4,10 +4,16 @@ requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.13' and sys_platform == 'linux'",
     "python_full_version == '3.12.*' and sys_platform == 'linux'",
-    "python_full_version >= '3.13' and sys_platform != 'linux'",
-    "python_full_version == '3.12.*' and sys_platform != 'linux'",
+    "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version >= '3.13' and sys_platform == 'darwin'",
+    "python_full_version >= '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32'",
+    "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
+    "python_full_version == '3.12.*' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32'",
     "python_full_version < '3.12' and sys_platform == 'linux'",
-    "python_full_version < '3.12' and sys_platform != 'linux'",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'darwin'",
+    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32'",
 ]
 
 [[package]]
@@ -635,7 +641,9 @@ dependencies = [
     { name = "haliax" },
     { name = "huggingface-hub" },
     { name = "ipdb" },
-    { name = "jax", extra = ["tpu"] },
+    { name = "jax", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "jax", extra = ["cuda13"], marker = "sys_platform == 'win32'" },
+    { name = "jax", extra = ["tpu"], marker = "sys_platform == 'linux'" },
     { name = "loguru" },
     { name = "nltk" },
     { name = "numpy" },
@@ -665,7 +673,9 @@ requires-dist = [
     { name = "haliax", git = "https://github.com/marin-community/haliax" },
     { name = "huggingface-hub", specifier = ">=0.26.2" },
     { name = "ipdb", specifier = ">=0.13.13" },
-    { name = "jax", extras = ["tpu"], specifier = ">=0.4.23" },
+    { name = "jax", marker = "sys_platform == 'darwin'", specifier = ">=0.4.23" },
+    { name = "jax", extras = ["cuda13"], marker = "sys_platform == 'win32'", specifier = ">=0.4.23" },
+    { name = "jax", extras = ["tpu"], marker = "sys_platform == 'linux'", specifier = ">=0.4.23" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "nltk", specifier = ">=3.9.1" },
     { name = "numpy", specifier = ">=2.1.3" },
@@ -1021,10 +1031,32 @@ wheels = [
 ]
 
 [package.optional-dependencies]
+cuda13 = [
+    { name = "jax-cuda13-plugin", extra = ["with-cuda"], marker = "sys_platform == 'win32'" },
+    { name = "jaxlib", marker = "sys_platform == 'win32'" },
+]
 tpu = [
-    { name = "jaxlib" },
-    { name = "libtpu" },
-    { name = "requests" },
+    { name = "jaxlib", marker = "sys_platform == 'linux'" },
+    { name = "libtpu", marker = "sys_platform == 'linux'" },
+    { name = "requests", marker = "sys_platform == 'linux'" },
+]
+
+[[package]]
+name = "jax-cuda13-pjrt"
+version = "0.8.1"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "jax-cuda13-plugin"
+version = "0.8.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jax-cuda13-pjrt", marker = "sys_platform == 'win32'" },
+]
+
+[package.optional-dependencies]
+with-cuda = [
+    { name = "nvidia-nvvm", marker = "sys_platform == 'win32'" },
 ]
 
 [[package]]
@@ -1656,6 +1688,14 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-nvvm"
+version = "13.1.80"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b2/8c/3f4302e50dea44870f15277b33c8d47cf6d6808c42aa0cda448e1eef0e16/nvidia_nvvm-13.1.80-py3-none-win_amd64.whl", hash = "sha256:aecefb4e9b4c6c0fb799db27ef32e7a3cf94d426c6689ff5679397a466af1769", size = 55413868, upload-time = "2025-12-05T17:53:21.251Z" },
+]
+
+[[package]]
 name = "opt-einsum"
 version = "3.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1782,7 +1822,7 @@ name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess" },
+    { name = "ptyprocess", marker = "sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/92/cc564bf6381ff43ce1f4d06852fc19a2f11d180f23dc32d9588bee2f149d/pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f", size = 166450, upload-time = "2023-11-25T09:07:26.339Z" }
 wheels = [
