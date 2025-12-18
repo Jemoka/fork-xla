@@ -76,9 +76,11 @@ args = configure(
         # "regular",
         # "regular",
     ],
-    out_dir="/home/houjun/bubbles/checkpoints"
+    out_dir="/home/houjun/bubbles/checkpoints",
     # per_device_batch_size=48, for h200s
     # per_device_batch_size=20, for a100s
+    per_device_batch_size=2, # for tpu-v4
+    batch_size=64, # so we don't insanely accumulate
 )
 # spec = parse_dataset_spec("/juice2/scr2/houjun/fork/experiments/data/pretrain.toml", args)
 # x,y =spec.get_batch(3)

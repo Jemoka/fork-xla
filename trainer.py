@@ -63,8 +63,7 @@ class Trainer:
         # Compute replication mesh setup
         devices = np.array(jax.devices())
 
-        self.input_mesh = Mesh(devices, axis_names=("batch",)) # DDP sharding, so batch dim goes to each device
-        self.input_sharding_plan = NamedSharding(self.input_mesh, P("batch", None)) # We have 2 dims in our input, (batch, seq_len)
+        self.ddp_mesh = Mesh(devices, axis_names=("batch",)) # DDP sharding, so batch dim goes to each device
         self.replicas = devices.shape[0]
 
         # compute how much to accumulate
@@ -131,6 +130,11 @@ class Trainer:
         # Initialize random keys
         self.key = jax_random.PRNGKey(0)
 
+        # raise if we are applying dropout, pretty sure the semantics of
+        # dropout key is not implemented correctly
+        if args.dropout > 0.0:
+            logger.warning("Dropout stochacisity may not have been implemented correctly...")
+
         # Initialize model parameters with dummy input
         self.key, init_key, self.dropout_key = jax_random.split(self.key, num=3)
         dummy_input = jnp.ones((1, args.block_size), dtype=jnp.int32)
@@ -165,7 +169,7 @@ class Trainer:
             transition_steps=decay_steps
         )
 
-        schedule = optax.join_schedules(
+        self.schedule = optax.join_schedules(
             schedules=[warmup_schedule, stable_schedule, decay_schedule],
             boundaries=[warmup_steps, warmup_steps + stable_steps]
         )
@@ -173,7 +177,7 @@ class Trainer:
         # Update optimizer with schedule
         self.tx = optax.chain(
             optax.clip_by_global_norm(1.0),
-            optax.scale_by_schedule(lambda count: schedule(count)),
+            optax.scale_by_schedule(lambda count: self.schedule(count)),
             self.tx
         )
 
@@ -276,37 +280,58 @@ class Trainer:
 
         return score, metrics
 
-    def batch(self, slice="train", deterministic_key=None):
+    def batch(self, slice="train", deterministic_key=None, accumulate=False):
+        accumulate_multiplier = self.accumulate_steps if accumulate else 1
         x, y = self.data_strategy.get_batch(
-            self.per_device_batch_size*self.device_count(), # because we will then shard it
+            (self.per_device_batch_size*
+             self.device_count()* # because we will then shard it
+             accumulate_multiplier), # because we will then accumulate it
             slice,
             deterministic_key=deterministic_key,
         )
 
         return x, y
 
-    def train_eval(self, state, batch):
-        """batch -> gradient"""
-        x, y = batch
 
-        def loss_fn(params):
-            logits, loss = state.apply_fn(
-                {'params': params},
-                x, y,
-                deterministic=False,
-                rngs={'dropout': self.dropout_key}
-            )
-            return loss / self.accumulate_steps
+    @staticmethod
+    def train_step(state, batch, dropout_key, accumulate_steps):
 
-        loss, grads = jax.value_and_grad(loss_fn)(state.params)
+        def train_eval(state, batch, dropout_key, accumulate_steps):
+            """batch -> gradient"""
+            x, y = batch
 
-        return loss, grads
+            def loss_fn(params):
+                logits, loss = state.apply_fn(
+                    {'params': params},
+                    x, y,
+                    deterministic=False,
+                    rngs={'dropout': dropout_key}
+                )
+                return loss / accumulate_steps
 
-    def train_step(self, state, grads) -> train_state.TrainState:
-        """state -> gradient -> new_state"""
+            loss, grads = jax.value_and_grad(loss_fn)(state.params)
 
-        ...
+            return loss, grads
 
+        def reduce(carry, batch):
+            """(gradient, loss) -> batch -> ((gradient_acc, loss_acc), None)"""
+
+            grad, loss = carry
+            loss_single, grad_single = train_eval(state, batch, dropout_key, accumulate_steps)
+
+            grad_acc = jax.tree_util.tree_map(lambda a, g: a + g, grad, grad_single)
+            loss_acc = loss + loss_single
+
+            return (grad_acc, loss_acc), None
+
+        grad_zero = jax.tree_util.tree_map(jnp.zeros_like, state.params)
+        (grad_sum, loss_sum), _ = jax.lax.scan(reduce, (grad_zero, 0.0), batch)
+
+        state = state.apply_gradients(grads=grad_sum)
+
+        return state, loss_sum
+       
+    
     def epoch(self):
         logger.info("BEGIN EPOCH")
 
@@ -314,9 +339,9 @@ class Trainer:
         mfu_start = time.time()
 
         # JIT compile + shard train step across workers 
-        train_eval = jax.jit(
-            self.train_eval,
-            in_shardings=(None, self.input_sharding_plan),
+        train_step = jax.jit(
+            self.train_step,
+            in_shardings=(None, NamedSharding(self.ddp_mesh, P(None, "batch", None)), None, None),
             out_shardings=(None, None),
         )
 
@@ -325,28 +350,32 @@ class Trainer:
         # because sometimes the load function may skip some epochs
         for indx in range(
             self.global_step_counter_*self.accumulate_steps,
-            self.total_batches + 1
+            self.total_batches + 1,
+            self.accumulate_steps
         ):
-            batch = jax.device_put(self.batch(), self.input_sharding_plan)
+            x,y = self.batch(accumulate=True)
+            x = x.reshape(
+                -1,
+                self.device_count()*self.per_device_batch_size,
+                self.args.block_size
+            )
+            y = y.reshape(
+                -1,
+                self.device_count()*self.per_device_batch_size,
+                self.args.block_size
+            )
 
-            # take a step, optionally with plotting
-            loss, grads = train_eval(self.state, batch)
+            batch = jax.device_put(
+                (x,y),
+                # accumulate steps, batchwise, seq length
+                NamedSharding(self.ddp_mesh, P(None, "batch", None))
+            )
 
-            # accumulate gradients
-            if grads_accum is None:
-                grads_accum = grads
-            else:
-                grads_accum = jax.tree_util.tree_map(
-                    lambda x, y: x + y, grads_accum, grads
-                )
-                
-            # if we are ready, apply gradients
-            if (indx % self.accumulate_steps == 0):
-
+            state, loss = train_step(self.state, batch, self.dropout_key, self.accumulate_steps)
             train_metrics = {"train/loss": float(loss)}
 
             # Get current learning rate
-            train_metrics["train/lr"] = float(self.tx._transformations[-1]._schedule(self.state.step))
+            train_metrics["train/lr"] = float(self.schedule(self.state.step))
             mfu_measurement_step_counter += 1
 
             # perform logging, and then increment
