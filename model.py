@@ -449,9 +449,9 @@ class Thoughtbubbles(nn.Module):
         wte = self.param(
             "wte",
             nn.initializers.normal(stddev=1.0),
-            (self.vocab_size, self.d_model),
-            self.param_dtype,
-        ).astype(jnp.bfloat16)
+            (self.config.vocab_size, self.config.n_embd),
+            jnp.bfloat16
+        )
 
         # Token embeddings
         tok_emb = jnp.take(wte, idx, axis=0)  # (b, t, n_embd)
