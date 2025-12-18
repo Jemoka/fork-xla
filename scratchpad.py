@@ -27,7 +27,7 @@ args = configure(
     flops_promised=312e12,
     report_interval=1,
     # validation_interval=1,
-    data_file="/juice2/scr2/houjun/fork/experiments/data/pretrain.toml",
+    data_file="/home/houjun/bubbles/recipes/pretrain.toml",
     block_size=512,
     max_block_size=1024,
     plan = [
@@ -51,32 +51,32 @@ args = configure(
         "regular",
         "regular",
 
-        "regular",
-        "regular",
-        "regular",
-        "regular",
+        # "regular",
+        # "regular",
+        # "regular",
+        # "regular",
 
-        "regular",
-        "regular",
-        "regular",
-        "regular",
+        # "regular",
+        # "regular",
+        # "regular",
+        # "regular",
 
-        "regular",
-        "regular",
-        "regular",
-        "regular",
+        # "regular",
+        # "regular",
+        # "regular",
+        # "regular",
 
-        "regular",
-        "regular",
-        "regular",
-        "regular",
+        # "regular",
+        # "regular",
+        # "regular",
+        # "regular",
 
-        "regular",
-        "regular",
-        "regular",
-        "regular",
-
+        # "regular",
+        # "regular",
+        # "regular",
+        # "regular",
     ],
+    out_dir="/home/houjun/bubbles/checkpoints"
     # per_device_batch_size=48, for h200s
     # per_device_batch_size=20, for a100s
 )
@@ -87,98 +87,108 @@ args = configure(
 
 # # !cat /etc/hostname
 # args.data_file = "./experiments/data/pretrain.toml"
+# print(jax.devices())
 
-trainer = Trainer(args, compile=True)
-trainer.train()
+trainer = Trainer(args)
+self = trainer
 
-# !git fetch && git checkout 829d37fb44eff4d597b3fea92ac42fc1d9290c86
+# trainer.train()
 
-# 26435936ef15a93b74e43dbfb5f2339fdad2c5a8
+# x,y= trainer.batch()
+# print(x)
+# type(x)
 
-# f944d935b765bfe81d876391fc6dc3f8e269f136
+# print(jax.devices())
 
-# import os
-# import numpy as np
+# print(trainer.model)
+# # !git fetch && git checkout 829d37fb44eff4d597b3fea92ac42fc1d9290c86
 
-# data = np.memmap(
-#     os.path.join("/sphinx/u/houjun/dataset/fineweb", "train.bin"), dtype=np.uint16, mode="r"
-# ).shape)
-# data[70_000_000_000]
-# print(data.shape)
-# 131 B
-# data[71072000000]
+# # 26435936ef15a93b74e43dbfb5f2339fdad2c5a8
 
-# tmp = np.memmap(
-#     os.path.join("/sphinx/u/houjun/dataset/pes2o_large", "train.bin"), dtype=np.uint16, mode="r"
-# )
+# # f944d935b765bfe81d876391fc6dc3f8e269f136
 
-# tmp[]
-# batch = tmp[500000000:500000000+72].reshape(8,9)
+# # import os
+# # import numpy as np
 
-# batch_size = 8
-# cut_batch = batch[(~(batch == 0).all(axis=-1))]
-# np.concat([cut_batch, cut_batch], axis=0)
-# if cut_batch.shape[0] < batch_size:
-#     new_batch = 
+# # data = np.memmap(
+# #     os.path.join("/sphinx/u/houjun/dataset/fineweb", "train.bin"), dtype=np.uint16, mode="r"
+# # ).shape)
+# # data[70_000_000_000]
+# # print(data.shape)
+# # 131 B
+# # data[71072000000]
+
+# # tmp = np.memmap(
+# #     os.path.join("/sphinx/u/houjun/dataset/pes2o_large", "train.bin"), dtype=np.uint16, mode="r"
+# # )
+
+# # tmp[]
+# # batch = tmp[500000000:500000000+72].reshape(8,9)
+
+# # batch_size = 8
+# # cut_batch = batch[(~(batch == 0).all(axis=-1))]
+# # np.concat([cut_batch, cut_batch], axis=0)
+# # if cut_batch.shape[0] < batch_size:
+# #     new_batch = 
     
 
-# mask = np.zeros_like(data, dtype=bool)
-# mask[len(data) - np.argmax(data[::-1] != 0):] = True
+# # mask = np.zeros_like(data, dtype=bool)
+# # mask[len(data) - np.argmax(data[::-1] != 0):] = True
 
-# mask
+# # mask
 
-# (data == 0)
-
-
-
-# w d
-
-# # trainer.train()
-# # x,y = trainer.batch()
-
-# # 
-# # enc.decode_batch(x.tolist())
-# # 1+1
-# # x
-# # y
-# # !ls 
-# # !realpath ~/nlp/fork/experiments/data/pretrain.toml
-# # self = trainer._vomit()
-
-# # # !cat /etc/hostname
-
-# for i in range(10):
-#     break
-# else:
-#     print("bchicken")
+# # (data == 0)
 
 
 
-# # # idx = torch.randint(128,(9, self.config.block_size)).cuda()
-# # # !git fetch && git checkout efcca7d57f2a17df00347b3f6d3dc8d1b0e9712e
+# # w d
 
-#  # fd4d5d85b447d7abc56f8e6ae5d1bba767779efa
+# # # trainer.train()
+# # # x,y = trainer.batch()
+
+# # # 
+# # # enc.decode_batch(x.tolist())
+# # # 1+1
+# # # x
+# # # y
+# # # !ls 
+# # # !realpath ~/nlp/fork/experiments/data/pretrain.toml
+# # # self = trainer._vomit()
+
+# # # # !cat /etc/hostname
+
+# # for i in range(10):
+# #     break
+# # else:
+# #     print("bchicken")
 
 
-# # from flywheel import MemmapDataset, Sampling, Strategy
-# # sampling = Strategy(args, [
-# #     Sampling(
-# #         MemmapDataset(args, "/sphinx/u/houjun/dataset/pes2o_new"),
+
+# # # # idx = torch.randint(128,(9, self.config.block_size)).cuda()
+# # # # !git fetch && git checkout efcca7d57f2a17df00347b3f6d3dc8d1b0e9712e
+
+# #  # fd4d5d85b447d7abc56f8e6ae5d1bba767779efa
 
 
-# #         0.5
-# #     ),
-# #     Sampling(
-# #         MemmapDataset(args, "/sphinx/u/houjun/dataset/openwebtext"),
-# #         0.5
-# #     )
-# # ])
+# # # from flywheel import MemmapDataset, Sampling, Strategy
+# # # sampling = Strategy(args, [
+# # #     Sampling(
+# # #         MemmapDataset(args, "/sphinx/u/houjun/dataset/pes2o_new"),
 
 
-# import tiktoken
-# enc = tiktoken.get_encoding("gpt2")
+# # #         0.5
+# # #     ),
+# # #     Sampling(
+# # #         MemmapDataset(args, "/sphinx/u/houjun/dataset/openwebtext"),
+# # #         0.5
+# # #     )
+# # # ])
 
-# # enc.decode_batch(sampling.get_batch(2, deterministic_key=4)[0].tolist())
+
+# # import tiktoken
+# # enc = tiktoken.get_encoding("gpt2")
+
+# # # enc.decode_batch(sampling.get_batch(2, deterministic_key=4)[0].tolist())
     
 
 

@@ -12,7 +12,6 @@ parser.add_argument("--flops_promised", default=989e12, type=float, help="how ma
 
 # intervals
 parser.add_argument("--report_interval", default=32, type=int, help="save to wandb every this many steps")
-parser.add_argument("--plot_interval", default=1024, type=int, help="checkpoint every this many steps")
 parser.add_argument("--checkpoint_interval", default=10240, type=int, help="checkpoint every this many steps")
 parser.add_argument("--validation_interval", default=1024, type=int, help="validate every this many steps")
 

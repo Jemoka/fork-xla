@@ -147,9 +147,6 @@ class CausalSelfAttention(nn.Module):
         # Initialize RoPE
         self.rope = RotaryPosEncoding(self.config.n_embd // self.config.n_head, seq_dim=-2)
 
-        # Cache for causal masks
-        self.cached_causal_mask = {}
-
     @nn.compact
     def __call__(self, x, cumulative_scores, token_index, padding_mask=None, deterministic=False):
         B, T, C = x.shape
@@ -192,14 +189,10 @@ class CausalSelfAttention(nn.Module):
 
         # Build causal attention mask
         mask_key = (q.shape[-2], k.shape[-2])
-        if mask_key not in self.cached_causal_mask:
-            causal_mask = jnp.tril(jnp.ones((q.shape[-2], k.shape[-2]), dtype=jnp.bool_))
-            causal_mask = jnp.where(causal_mask,
-                                   jnp.zeros_like(causal_mask, dtype=jnp.float32),
-                                   jnp.full_like(causal_mask, float("-inf"), dtype=jnp.float32))
-            self.cached_causal_mask[mask_key] = causal_mask
-
-        causal_mask = self.cached_causal_mask[mask_key]
+        causal_mask = jnp.tril(jnp.ones((q.shape[-2], k.shape[-2]), dtype=jnp.bool_))
+        causal_mask = jnp.where(causal_mask,
+                                jnp.zeros_like(causal_mask, dtype=jnp.float32),
+                                jnp.full_like(causal_mask, float("-inf"), dtype=jnp.float32))
         causal_mask = jnp.repeat(causal_mask[None, :, :], B, axis=0)
         mask = causal_mask
 
@@ -510,13 +503,13 @@ class Thoughtbubbles(nn.Module):
 
             # Mask out ignore index (-1)
             mask = targets_flat != -1
-            logits_masked = logits_flat[mask]
-            targets_masked = targets_flat[mask]
+            logits_masked = logits_flat
+            targets_masked = jnp.where(mask, targets_flat, 0)
 
             loss = -jnp.sum(
-                jax.nn.log_softmax(logits_masked, axis=-1) *
-                jax.nn.one_hot(targets_masked, self.config.vocab_size)
-            ) / jnp.sum(mask)
+                (jax.nn.log_softmax(logits_masked, axis=-1) *
+                 jax.nn.one_hot(targets_masked, self.config.vocab_size))*mask[:,None]
+            ) / mask.sum().clip(min=1)
         else:
             loss = None
 
@@ -539,11 +532,6 @@ class Thoughtbubbles(nn.Module):
                 summed_residuals = summed_residuals.at[b, idx].add(scaled_residuals[b, i])
 
         return summed_residuals
-
-    def get_num_params(self, non_embedding=True):
-        """Return the number of parameters in the model"""
-        # This will be computed after initialization
-        return 0  # Placeholder
 
     def configure_optimizers_adamw(self, weight_decay, learning_rate, betas, device_type):
         """Returns Optax optimizer for AdamW"""

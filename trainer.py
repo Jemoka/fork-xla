@@ -1,11 +1,6 @@
 # common standard library utilities
 import os
 from pathlib import Path
-PTXAS_PATH = "/usr/local/cuda/bin/ptxas"
-
-if os.path.exists(PTXAS_PATH):
-    os.environ["TRITON_PTXAS_PATH"] = PTXAS_PATH
-
 import sys
 import time
 import json
@@ -29,6 +24,7 @@ from flax.training import train_state, checkpoints, orbax_utils
 from flax import struct
 import optax
 import orbax.checkpoint as ocp
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 # MLOps
 import wandb
@@ -38,30 +34,13 @@ from loguru import logger
 
 # our stuff
 from model import *
-from data import *
 from utils import plot_logger, parse_dataset_spec
 
 R = Random(7)
 
-
-class TrainState(train_state.TrainState):
-    """Extended train state with additional fields"""
-    key: jax.random.PRNGKey
-    step_offset: int = 0
-
-
 class Trainer:
-    def main_process(self):
-        if not self.distributed:
-            return True
-        else:
-            return jax.process_index() == 0
-
-    def world_size(self):
-        if self.distributed:
-            return jax.process_count()
-        else:
-            return 1
+    def device_count(self):
+        return jax.device_count()
 
     @staticmethod
     def find_accumulation_steps(
@@ -74,70 +53,67 @@ class Trainer:
                 return batch_size, global_batch_size // (batch_size * dp_replicate)
         raise ValueError(f"No grad_acc found for global_batch_size {global_batch_size} and max_batch_size {max_batch_size} and dp_replicate {dp_replicate}")
 
-    def __init__(self, args, run_id=None, compile=False):
+    def __init__(self, args, run_id=None):
         # set up the trainer
         self.args = args
 
         # Flag to check if we are running in a distributed environment
-        self.distributed = False
         self.per_device_batch_size = args.per_device_batch_size
-        replicas = 1
 
-        # Check for distributed JAX setup
-        if jax.process_count() > 1:
-            self.distributed = True
-            replicas = jax.process_count()
+        # Compute replication mesh setup
+        devices = np.array(jax.devices())
+
+        self.input_mesh = Mesh(devices, axis_names=("batch",)) # DDP sharding, so batch dim goes to each device
+        self.input_sharding_plan = NamedSharding(self.input_mesh, P("batch", None)) # We have 2 dims in our input, (batch, seq_len)
+        self.replicas = devices.shape[0]
 
         # compute how much to accumulate
         self.per_device_batch_size, self.accumulate_steps = self.find_accumulation_steps(
             args.batch_size,
             self.per_device_batch_size,
-            replicas
+            self.replicas
         )
 
         # scale *up* the total steps as a function of how many steps to accumulate
         self.total_batches = args.total_steps * self.accumulate_steps
 
         # print statistics
-        if self.main_process():
-            logger.info(
-                "BATCHING | {} batchsize/node * {} nodes * {} accumulation = {} batchsize",
-                self.per_device_batch_size,
-                replicas,
-                self.accumulate_steps,
-                args.batch_size,
-            )
-            logger.info(
-                "STEPS | {} micro batches // {} accumulation = {} steps",
-                self.total_batches,
-                self.accumulate_steps,
-                self.total_batches // self.accumulate_steps
-            )
-            logger.info(
-                "TOKENS | {} steps * {} batchsize * {} blocksize = {} tokens",
-                self.total_batches // self.accumulate_steps,
-                args.batch_size,
-                args.block_size,
-                (self.total_batches // self.accumulate_steps)*
-                args.batch_size*
-                args.block_size
-            )
+        logger.info(
+            "BATCHING | {} batchsize/node * {} chips * {} accumulation = {} batchsize",
+            self.per_device_batch_size,
+            self.replicas,
+            self.accumulate_steps,
+            args.batch_size,
+        )
+        logger.info(
+            "STEPS | {} micro batches // {} accumulation = {} steps",
+            self.total_batches,
+            self.accumulate_steps,
+            self.total_batches // self.accumulate_steps
+        )
+        logger.info(
+            "TOKENS | {} steps * {} batchsize * {} blocksize = {} tokens",
+            self.total_batches // self.accumulate_steps,
+            args.batch_size,
+            args.block_size,
+            (self.total_batches // self.accumulate_steps)*
+            args.batch_size*
+            args.block_size
+        )
 
         # initialize wandb
-        if self.main_process():
-            wandb.init(
-                project="fork",
-                config=vars(args),
-                mode=None if args.wandb else "disabled",
-                name=args.experiment,
-                resume="allow",
-                id=run_id,
-            )
+        wandb.init(
+            project="fork",
+            config=vars(args),
+            mode=None if args.wandb else "disabled",
+            name=args.experiment,
+            resume="allow",
+            id=run_id,
+        )
 
         # set up logger that's noop on main process
         def log(*args, **kwargs):
-            if self.main_process():
-                wandb.log(*args, **kwargs)
+            wandb.log(*args, **kwargs)
 
         self.plot, self.get_plots = plot_logger(logger=log, args=self.args)
 
@@ -156,7 +132,7 @@ class Trainer:
         self.key = jax_random.PRNGKey(0)
 
         # Initialize model parameters with dummy input
-        key, init_key = jax_random.split(self.key)
+        self.key, init_key, self.dropout_key = jax_random.split(self.key, num=3)
         dummy_input = jnp.ones((1, args.block_size), dtype=jnp.int32)
         variables = self.model.init(init_key, dummy_input, deterministic=True)
         params = variables['params']
@@ -170,9 +146,7 @@ class Trainer:
                 device_type="gpu" if jax.devices()[0].platform == "gpu" else "tpu",
             )
         else:
-            logger.warning("The current muon optimizer has been converted to JAX/Optax")
-            from muon import create_muon_optax
-            self.tx = create_muon_optax(args, distributed=self.distributed)
+            raise RuntimeError("Sadly I haven't ported muon yet mmmmm...")
 
         # Create learning rate schedule (WSD: Warmup-Stable-Decay)
         warmup_steps = int((self.total_batches // self.accumulate_steps) * self.args.warmup_pct)
@@ -204,28 +178,18 @@ class Trainer:
         )
 
         # Create training state
-        self.state = TrainState.create(
+        self.state = train_state.TrainState.create(
             apply_fn=self.model.apply,
             params=params,
-            tx=self.tx,
-            key=key,
-            step_offset=0
+            tx=self.tx
         )
 
-        # Replicate state across devices if using pmap
-        if self.distributed and jax.device_count() > 1:
-            self.state = flax.jax_utils.replicate(self.state)
+        total = sum(x.size for x in jax.tree_util.tree_leaves(self.state.params)) / 1e6
+        logger.info(f"MODEL | Total Parameters: {total:.2f}m")
 
         # compute training size + the counter (useful for mid-checkpoint recovery)
         self.global_step_counter_ = 0
         self.best_val_score_ = float("-inf")  # "score" means higher is better
-
-        if compile:
-            # JIT compile training and eval functions
-            self.args.compiled = True
-            logger.info("MODEL | Initialized model with JAX JIT compilation!")
-        else:
-            self.args.compiled = False
 
         # configure dataset
         if vars(args).get("data_file") is None:
@@ -238,10 +202,8 @@ class Trainer:
             self.data_strategy = parse_dataset_spec(args.data_file, args)
 
         # weeeeeeeeeeee
-        if self.main_process():
-            wandb.watch(self.model)
-            # print the model
-            logger.info(self.model)
+        # print the model
+        logger.info(self.model)
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
         """estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS"""
@@ -262,16 +224,11 @@ class Trainer:
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
         # express our flops throughput as ratio of A100 bfloat16 peak flops
         flops_achieved = flops_per_iter * (1.0 / dt)  # per second
-        flops_promised = self.args.flops_promised * self.world_size()
+        flops_promised = self.args.flops_promised * self.device_count()
         mfu = flops_achieved / flops_promised
         return mfu, flops_achieved
 
     def train(self):
-        logger.info("Waiting for everyone...")
-        if self.distributed:
-            # JAX synchronization
-            jax.experimental.multihost_utils.sync_global_devices("training_start")
-
         if not Path(self.recovery_dir).exists():
             logger.info("Building recovery checkpoint...")
             self.save(self.recovery_dir)
@@ -321,14 +278,15 @@ class Trainer:
 
     def batch(self, slice="train", deterministic_key=None):
         x, y = self.data_strategy.get_batch(
-            self.per_device_batch_size,
+            self.per_device_batch_size*self.device_count(), # because we will then shard it
             slice,
             deterministic_key=deterministic_key,
         )
+
         return x, y
 
-    def train_step(self, state, batch):
-        """Single training step (jitted)"""
+    def train_eval(self, state, batch):
+        """batch -> gradient"""
         x, y = batch
 
         def loss_fn(params):
@@ -336,54 +294,56 @@ class Trainer:
                 {'params': params},
                 x, y,
                 deterministic=False,
-                rngs={'dropout': state.key}
+                rngs={'dropout': self.dropout_key}
             )
             return loss / self.accumulate_steps
 
         loss, grads = jax.value_and_grad(loss_fn)(state.params)
 
-        # Apply gradients
-        state = state.apply_gradients(grads=grads)
+        return loss, grads
 
-        # Update RNG key
-        new_key = jax_random.split(state.key)[0]
-        state = state.replace(key=new_key)
+    def train_step(self, state, grads) -> train_state.TrainState:
+        """state -> gradient -> new_state"""
 
-        return state, loss
+        ...
 
     def epoch(self):
-        if self.main_process():
-            logger.info("BEGIN EPOCH")
+        logger.info("BEGIN EPOCH")
 
         mfu_measurement_step_counter = 0
         mfu_start = time.time()
 
-        # JIT compile train step if enabled
-        if self.args.compiled:
-            train_step_fn = jax.jit(self.train_step)
-        else:
-            train_step_fn = self.train_step
+        # JIT compile + shard train step across workers 
+        train_eval = jax.jit(
+            self.train_eval,
+            in_shardings=(None, self.input_sharding_plan),
+            out_shardings=(None, None),
+        )
+
+        grads_accum = None
 
         # because sometimes the load function may skip some epochs
         for indx in range(
             self.global_step_counter_*self.accumulate_steps,
             self.total_batches + 1
         ):
-            batch = self.batch()
+            batch = jax.device_put(self.batch(), self.input_sharding_plan)
 
             # take a step, optionally with plotting
-            if (indx % self.accumulate_steps == 0) and (
-                    indx // self.accumulate_steps
-            ) % self.args.plot_interval == 0:
-                with self.plot(
-                    indx // self.accumulate_steps,
-                    debug=(not self.args.wandb),
-                ):
-                    self.state, loss = train_step_fn(self.state, batch)
-                    train_metrics = {"train/loss": float(loss)}
+            loss, grads = train_eval(self.state, batch)
+
+            # accumulate gradients
+            if grads_accum is None:
+                grads_accum = grads
             else:
-                self.state, loss = train_step_fn(self.state, batch)
-                train_metrics = {"train/loss": float(loss)}
+                grads_accum = jax.tree_util.tree_map(
+                    lambda x, y: x + y, grads_accum, grads
+                )
+                
+            # if we are ready, apply gradients
+            if (indx % self.accumulate_steps == 0):
+
+            train_metrics = {"train/loss": float(loss)}
 
             # Get current learning rate
             train_metrics["train/lr"] = float(self.tx._transformations[-1]._schedule(self.state.step))
@@ -401,7 +361,7 @@ class Trainer:
                     mfu, flops = self.estimate_mfu(
                         mfu_measurement_step_counter
                         * self.per_device_batch_size
-                        * self.world_size(),
+                        * self.device_count(),
                         time.time() - mfu_start,
                     )
                     mfu_start = time.time()
@@ -414,17 +374,16 @@ class Trainer:
                      self.args.batch_size*self.args.block_size)
                 )
 
-                if self.main_process():
-                    wandb.log(
-                        train_metrics,
-                        step=indx // self.accumulate_steps,
-                    )
-                    logger.info(
-                        "TRAIN | {}/{} | loss {}",
-                        indx // self.accumulate_steps,
-                        self.total_batches // self.accumulate_steps,
-                        float(loss),
-                    )
+                wandb.log(
+                    train_metrics,
+                    step=indx // self.accumulate_steps,
+                )
+                logger.info(
+                    "TRAIN | {}/{} | loss {}",
+                    indx // self.accumulate_steps,
+                    self.total_batches // self.accumulate_steps,
+                    float(loss),
+                )
             if (indx % self.accumulate_steps == 0):
                 self.global_step_counter_ += 1
 
@@ -449,28 +408,23 @@ class Trainer:
                     == 0
             ):
                 score, val_metrics = self.val()
-                if self.main_process():
-                    wandb.log(
-                        val_metrics,
-                        step=indx // self.accumulate_steps,
-                    )
-                    logger.info(
-                        "VAL | {} | score {}",
-                        indx // self.accumulate_steps,
-                        score,
-                    )
+                wandb.log(
+                    val_metrics,
+                    step=indx // self.accumulate_steps,
+                )
+                logger.info(
+                    "VAL | {} | score {}",
+                    indx // self.accumulate_steps,
+                    score,
+                )
 
                 if score > self.best_val_score_:
-                    if self.main_process():
-                        logger.info("VAL | BEST SCORE | score {}", score)
+                    logger.info("VAL | BEST SCORE | score {}", score)
                     self.best_val_score_ = score
                     self.save(self.best_dir)
 
     def load(self, path):
         logger.debug("CHECKPOINT | loading checkpoint from {}", path)
-
-        if self.distributed:
-            jax.experimental.multihost_utils.sync_global_devices("checkpoint_load")
 
         # Load random state
         rng_state = np.load(os.path.join(path, "rng.npy"), allow_pickle=True).item()
@@ -481,7 +435,7 @@ class Trainer:
         # Load checkpoint using Orbax
         checkpointer = ocp.PyTreeCheckpointer()
         restored = checkpointer.restore(os.path.join(path, "checkpoint"))
-        self.state = self.state.replace(params=restored['params'])
+        self.state = restored["state"]
 
         # Load config
         with open(os.path.join(path, "config.json"), "r") as df:
@@ -496,53 +450,44 @@ class Trainer:
 
         os.makedirs(path, exist_ok=True)
 
-        if self.main_process():
-            # Save random state
-            rng_state = {
-                "python_random": random.getstate(),
-                "numpy_random": np.random.get_state(),
-                "jax_random": int(self.key[0]),  # Save seed
-            }
-            np.save(os.path.join(path, "rng.npy"), rng_state)
+        # Save random state
+        rng_state = {
+            "python_random": random.getstate(),
+            "numpy_random": np.random.get_state(),
+            "jax_random": int(self.key[0]),  # Save seed
+        }
+        np.save(os.path.join(path, "rng.npy"), rng_state)
 
-            # Save checkpoint using Orbax
-            checkpointer = ocp.PyTreeCheckpointer()
-            checkpointer.save(
-                os.path.join(path, "checkpoint"),
-                {'params': self.state.params}
+        # Save checkpoint 
+        checkpointer = ocp.PyTreeCheckpointer()
+        checkpointer.save(
+            os.path.join(path, "checkpoint"),
+            {'state': jax.device_get(self.state)},
+            force=True
+        )
+
+        # Save config
+        with open(os.path.join(path, "config.json"), "w") as df:
+            json.dump(
+                {
+                    "config": vars(self.args),
+                    "steps": self.global_step_counter_,
+                    "score": self.best_val_score_,
+                    "wandb": wandb.run.id if self.args.wandb else None,
+                },
+                df,
             )
 
-            # Save config
-            with open(os.path.join(path, "config.json"), "w") as df:
-                json.dump(
-                    {
-                        "config": vars(self.args),
-                        "steps": self.global_step_counter_,
-                        "score": self.best_val_score_,
-                        "wandb": wandb.run.id if self.args.wandb else None,
-                    },
-                    df,
-                )
-
-        # Sync all processes
-        if self.distributed:
-            jax.experimental.multihost_utils.sync_global_devices("checkpoint_save")
-
     @classmethod
-    def from_pretrained(cls, path, disable_wandb=True, compile=False):
+    def from_pretrained(cls, path, disable_wandb=True):
         with open(os.path.join(path, "config.json"), "r") as df:
             data = json.load(df)
         args = Namespace(**data.get("config", {}))
         args.wandb = False if disable_wandb else args.wandb
-        new = cls(args, run_id=data.get("wandb"), compile=compile)
+        new = cls(args, run_id=data.get("wandb"))
         new.load(path)
 
         if disable_wandb:
             new.args.wandb = False
 
         return new
-
-    @property
-    def device(self):
-        # In JAX, we work with the default device
-        return jax.devices()[0]
