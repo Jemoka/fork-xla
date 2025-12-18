@@ -153,6 +153,7 @@ class CausalSelfAttention(nn.Module):
             dtype=jnp.bfloat16
         )
 
+    @nn.compact
     def __call__(self, x, cumulative_scores, token_index, padding_mask=None, deterministic=False):
         # sometimes peolpe do float32 attn, idk
         ATTN_DTYPE = jnp.bfloat16 

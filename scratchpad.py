@@ -92,9 +92,13 @@ args = configure(
 # print(jax.devices())
 
 trainer = Trainer(args)
-self = trainer
+# self = trainer
 
-# trainer.train()
+# from pathlib import Path
+# Path(trainer.recovery_dir).exists()
+# trainer.recovery_dir
+# !ls '/home/houjun/bubbles/checkpoints/test'
+trainer.train()
 
 # x,y= trainer.batch()
 # print(x)
