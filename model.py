@@ -37,11 +37,6 @@ class RotaryPosEncoding:
         inv_freq = 1.0 / (base ** (jnp.arange(0, d_model, 2, dtype=jnp.float32) / d_model))
         self.inv_freq = inv_freq
 
-        # Cache for sin/cos
-        self.seq_len_cached = 0
-        self.cos_cached = None
-        self.sin_cached = None
-
     def rotate_half(self, x: jnp.ndarray) -> jnp.ndarray:
         x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
         return jnp.concatenate((-x2, x1), axis=-1)
@@ -58,35 +53,26 @@ class RotaryPosEncoding:
 
     def get(self, x: jnp.ndarray, t: Optional[jnp.ndarray] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
         seq_len = x.shape[self.seq_dim]
-        enable_cache = t is None
 
-        if (not enable_cache) or (seq_len > self.seq_len_cached):
-            self.seq_len_cached = seq_len
-            if t is None:
-                t = jnp.arange(x.shape[self.seq_dim], dtype=jnp.float32)
+        if t is None:
+            t = jnp.arange(x.shape[self.seq_dim], dtype=jnp.float32)
 
-            t = t.astype(self.inv_freq.dtype)
+        t = t.astype(self.inv_freq.dtype)
 
-            freqs = jnp.einsum("...i,j->...ij", t, self.inv_freq)
-            emb = jnp.concatenate((freqs, freqs), axis=-1)
+        freqs = jnp.einsum("...i,j->...ij", t, self.inv_freq)
+        emb = jnp.concatenate((freqs, freqs), axis=-1)
 
-            tgt_shape = [1] * x.ndim
-            tgt_shape[self.seq_dim] = seq_len
-            tgt_shape[-1] = x.shape[-1]
+        tgt_shape = [1] * x.ndim
+        tgt_shape[self.seq_dim] = seq_len
+        tgt_shape[-1] = x.shape[-1]
 
-            # support batch
-            tgt_shape[0] = -1
+        # support batch
+        tgt_shape[0] = -1
 
-            cos = jnp.cos(emb).reshape(tgt_shape)
-            sin = jnp.sin(emb).reshape(tgt_shape)
+        cos = jnp.cos(emb).reshape(tgt_shape)
+        sin = jnp.sin(emb).reshape(tgt_shape)
 
-            if enable_cache:
-                self.cos_cached = cos
-                self.sin_cached = sin
-            else:
-                return sin, cos
-
-        return self.sin_cached, self.cos_cached
+        return sin, cos
 
     def __call__(self, q: jnp.ndarray, k: jnp.ndarray, pos_offset: int = 0,
                 t: Optional[jnp.ndarray] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
