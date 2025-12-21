@@ -61,7 +61,7 @@ class Trainer:
 
         # If we are distribtued, initialize
         if distributed:
-            jax.distributed.initialize()
+            self.distributed = True
         
         self.per_device_batch_size = args.per_device_batch_size
 

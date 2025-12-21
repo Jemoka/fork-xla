@@ -12,7 +12,6 @@ from loguru import logger
 from dotenv import load_dotenv
 
 import parameters
-from commands import execute
 
 load_dotenv()
 
@@ -48,6 +47,10 @@ logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
 if __name__ == "__main__":
     args = parameters.parser.parse_args()
+    if args.distributed:
+
+        import jax
+        jax.distributed.initialize()
 
     logger.add(
         sys.stderr,
@@ -65,4 +68,5 @@ if __name__ == "__main__":
     logger.info(f"JAX process count: {jax.process_count()}")
     logger.info(f"JAX process index: {jax.process_index()}")
 
+    from commands import execute
     execute(args)
