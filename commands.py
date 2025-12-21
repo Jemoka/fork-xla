@@ -15,9 +15,9 @@ def execute(args):
         # whatever wandb settings was there b/c we usually
         # use this to load an existing model, but when we are
         # actually training, we want to actually enable it
-        trainer = Trainer.from_pretrained(args.warm_start, disable_wandb=False, compile=True)
+        trainer = Trainer.from_pretrained(args.warm_start, disable_wandb=False, compile=True, distributed=args.distributed)
     else:
-        trainer = Trainer(args, compile=True)
+        trainer = Trainer(args, compile=True, distributed=args.distributed)
 
     # hook a signal to checkponit on preemption
     def checkpoint_on_preemption(signum, frame):

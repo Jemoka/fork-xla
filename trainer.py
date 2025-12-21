@@ -55,11 +55,14 @@ class Trainer:
                 return batch_size, global_batch_size // (batch_size * dp_replicate)
         raise ValueError(f"No grad_acc found for global_batch_size {global_batch_size} and max_batch_size {max_batch_size} and dp_replicate {dp_replicate}")
 
-    def __init__(self, args, run_id=None):
+    def __init__(self, args, run_id=None, distributed=False):
         # set up the trainer
         self.args = args
 
-        # Flag to check if we are running in a distributed environment
+        # If we are distribtued, initialize
+        if distributed:
+            jax.distributed.initialize()
+        
         self.per_device_batch_size = args.per_device_batch_size
 
         # Compute replication mesh setup
@@ -514,12 +517,12 @@ class Trainer:
             )
 
     @classmethod
-    def from_pretrained(cls, path, disable_wandb=True):
+    def from_pretrained(cls, path, disable_wandb=True, distributed=False):
         with open(os.path.join(path, "config.json"), "r") as df:
             data = json.load(df)
         args = Namespace(**data.get("config", {}))
         args.wandb = False if disable_wandb else args.wandb
-        new = cls(args, run_id=data.get("wandb"))
+        new = cls(args, run_id=data.get("wandb"), distributed=distributed)
         new.load(path)
 
         if disable_wandb:
