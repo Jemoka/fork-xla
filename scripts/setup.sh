@@ -9,8 +9,8 @@ sudo apt-get update
 sudo apt-get install gcsfuse
 mkdir scratch
 mkdir checkpoints
-gcsfuse --file-mode=777 --dir-mode=777 thoughtbubbles_scratch ./scratch
-gcsfuse --file-mode=777 --dir-mode=777 thoughtbubbles_checkpoints ./checkpoints
+gcsfuse --implicit-dirs --file-mode=777 --dir-mode=777 thoughtbubbles_scratch ./scratch
+gcsfuse --implicit-dirs --file-mode=777 --dir-mode=777 thoughtbubbles_checkpoints ./checkpoints
 
 # repo
 curl -LsSf https://astral.sh/uv/install.sh | sh
