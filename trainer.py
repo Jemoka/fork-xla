@@ -44,6 +44,9 @@ class Trainer:
     def device_count(self):
         return jax.device_count()
 
+    def main_process(self):
+        return jax.process_index() == 0
+
     @staticmethod
     def find_accumulation_steps(
             global_batch_size: int,
@@ -82,42 +85,45 @@ class Trainer:
         self.total_batches = args.total_steps * self.accumulate_steps
 
         # print statistics
-        logger.info(
-            "BATCHING | {} batchsize/node * {} chips * {} accumulation = {} batchsize",
-            self.per_device_batch_size,
-            self.replicas,
-            self.accumulate_steps,
-            args.batch_size,
-        )
-        logger.info(
-            "STEPS | {} micro batches // {} accumulation = {} steps",
-            self.total_batches,
-            self.accumulate_steps,
-            self.total_batches // self.accumulate_steps
-        )
-        logger.info(
-            "TOKENS | {} steps * {} batchsize * {} blocksize = {} tokens",
-            self.total_batches // self.accumulate_steps,
-            args.batch_size,
-            args.block_size,
-            (self.total_batches // self.accumulate_steps)*
-            args.batch_size*
-            args.block_size
-        )
+        if self.main_process():
+            logger.info(
+                "BATCHING | {} batchsize/node * {} nodes * {} accumulation = {} batchsize",
+                self.per_device_batch_size,
+                self.replicas,
+                self.accumulate_steps,
+                args.batch_size,
+            )
+            logger.info(
+                "STEPS | {} micro batches // {} accumulation = {} steps",
+                self.total_batches,
+                self.accumulate_steps,
+                self.total_batches // self.accumulate_steps
+            )
+            logger.info(
+                "TOKENS | {} steps * {} batchsize * {} blocksize = {} tokens",
+                self.total_batches // self.accumulate_steps,
+                args.batch_size,
+                args.block_size,
+                (self.total_batches // self.accumulate_steps)*
+                args.batch_size*
+                args.block_size
+            )
 
         # initialize wandb
-        wandb.init(
-            project="fork",
-            config=vars(args),
-            mode=None if args.wandb else "disabled",
-            name=args.experiment,
-            resume="allow",
-            id=run_id,
-        )
+        if self.main_process():
+            wandb.init(
+                project="fork",
+                config=vars(args),
+                mode=None if args.wandb else "disabled",
+                name=args.experiment,
+                resume="allow",
+                id=run_id,
+            )
 
-        # set up logger that's noop on main process
+        # set up logger that's noop on non-main process
         def log(*args, **kwargs):
-            wandb.log(*args, **kwargs)
+            if self.main_process():
+                wandb.log(*args, **kwargs)
 
         self.plot, self.get_plots = plot_logger(logger=log, args=self.args)
 
@@ -194,7 +200,8 @@ class Trainer:
         )
 
         total = sum(x.size for x in jax.tree_util.tree_leaves(self.state.params)) / 1e6
-        logger.info(f"MODEL | Total Parameters: {total:.2f}m")
+        if self.main_process():
+            logger.info(f"MODEL | Total Parameters: {total:.2f}m")
 
         # compute training size + the counter (useful for mid-checkpoint recovery)
         self.global_step_counter_ = 0
@@ -212,7 +219,8 @@ class Trainer:
 
         # weeeeeeeeeeee
         # print the model
-        logger.info(self.model)
+        if self.main_process():
+            logger.info(self.model)
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
         """estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS"""
@@ -239,21 +247,26 @@ class Trainer:
 
     def train(self):
         if not Path(self.recovery_dir).exists():
-            logger.info("Building recovery checkpoint...")
+            if self.main_process():
+                logger.info("Building recovery checkpoint...")
             self.save(self.recovery_dir)
-        logger.info("Beginning training...")
+        if self.main_process():
+            logger.info("Beginning training...")
         try:
             self.epoch()
         except Exception as e:
-            logger.info(f"TRAIN | FAILURE | building recovery checkpoint")
+            if self.main_process():
+                logger.info(f"TRAIN | FAILURE | building recovery checkpoint")
             try:
                 # move recovery checkpoint to self.recovery_dir+"_last_good"
                 shutil.rmtree(self.recovery_dir.removesuffix("/")+"_last_good", ignore_errors=True)
                 shutil.move(self.recovery_dir, self.recovery_dir.removesuffix("/")+"_last_good")
                 self.save(self.recovery_dir)
-                logger.error(f"TRAIN | FAILURE | Encountered exception {str(e)}; safely checkpointed, so we're blowing up now...")
+                if self.main_process():
+                    logger.error(f"TRAIN | FAILURE | Encountered exception {str(e)}; safely checkpointed, so we're blowing up now...")
             except Exception as es:
-                logger.error(f"TRAIN | FAILURE | Encountered exception {str(e)}; CHECKPOINT FAILED with '{str(es)}', but eh, so we're blowing up anyways...")
+                if self.main_process():
+                    logger.error(f"TRAIN | FAILURE | Encountered exception {str(e)}; CHECKPOINT FAILED with '{str(es)}', but eh, so we're blowing up anyways...")
                 raise e
             raise e
         self.finish()
@@ -268,8 +281,8 @@ class Trainer:
         for i in range(
             0, vars(self.args).get("validation_steps", 256), self.per_device_batch_size
         ):
-            # get a batch and inference
-            x, y = self.batch("val", deterministic_key=i)
+            # get a batch and inference (only on main process, so don't replicate)
+            x, y = self.batch("val", deterministic_key=i, replicate=False)
 
             # Run validation step
             logits, loss = self.state.apply_fn(
@@ -289,11 +302,12 @@ class Trainer:
 
         return score, metrics
 
-    def batch(self, slice="train", deterministic_key=None, accumulate=False):
+    def batch(self, slice="train", deterministic_key=None, accumulate=False, replicate=True):
         accumulate_multiplier = self.accumulate_steps if accumulate else 1
+        device_multiplier = self.device_count() if replicate else 1
         x, y = self.data_strategy.get_batch(
             (self.per_device_batch_size*
-             self.device_count()* # because we will then shard it
+             device_multiplier* # because we will then shard it
              accumulate_multiplier), # because we will then accumulate it
             slice,
             deterministic_key=deterministic_key,
@@ -342,7 +356,8 @@ class Trainer:
        
     
     def epoch(self):
-        logger.info("BEGIN EPOCH")
+        if self.main_process():
+            logger.info("BEGIN EPOCH")
 
         mfu_measurement_step_counter = 0
         mfu_start = time.time()
@@ -412,20 +427,22 @@ class Trainer:
                      self.args.batch_size*self.args.block_size)
                 )
 
-                wandb.log(
-                    train_metrics,
-                    step=indx // self.accumulate_steps,
-                )
-                logger.info(
-                    "TRAIN | {}/{} | loss {}",
-                    indx // self.accumulate_steps,
-                    self.total_batches // self.accumulate_steps,
-                    float(loss),
-                )
+                if self.main_process():
+                    wandb.log(
+                        train_metrics,
+                        step=indx // self.accumulate_steps,
+                    )
+                    logger.info(
+                        "TRAIN | {}/{} | loss {}",
+                        indx // self.accumulate_steps,
+                        self.total_batches // self.accumulate_steps,
+                        float(loss),
+                    )
             if (indx % self.accumulate_steps == 0):
                 self.global_step_counter_ += 1
 
-            logger.debug("STEP | {} | {}", indx, train_metrics)
+            if self.main_process():
+                logger.debug("STEP | {} | {}", indx, train_metrics)
 
             # save a checkpoint, if needed
             if (
@@ -445,21 +462,22 @@ class Trainer:
                     % self.args.validation_interval
                     == 0
             ):
-                score, val_metrics = self.val()
-                wandb.log(
-                    val_metrics,
-                    step=indx // self.accumulate_steps,
-                )
-                logger.info(
-                    "VAL | {} | score {}",
-                    indx // self.accumulate_steps,
-                    score,
-                )
+                if self.main_process():
+                    score, val_metrics = self.val()
+                    wandb.log(
+                        val_metrics,
+                        step=indx // self.accumulate_steps,
+                    )
+                    logger.info(
+                        "VAL | {} | score {}",
+                        indx // self.accumulate_steps,
+                        score,
+                    )
 
-                if score > self.best_val_score_:
-                    logger.info("VAL | BEST SCORE | score {}", score)
-                    self.best_val_score_ = score
-                    self.save(self.best_dir)
+                    if score > self.best_val_score_:
+                        logger.info("VAL | BEST SCORE | score {}", score)
+                        self.best_val_score_ = score
+                        self.save(self.best_dir)
 
     def load(self, path):
         logger.debug("CHECKPOINT | loading checkpoint from {}", path)
@@ -484,6 +502,10 @@ class Trainer:
         self.best_val_score_ = data.get("score", 0)
 
     def save(self, path):
+        # Only save on main process
+        if not self.main_process():
+            return
+
         logger.debug("CHECKPOINT | saving checkpoint at {}", path)
 
         os.makedirs(path, exist_ok=True)
