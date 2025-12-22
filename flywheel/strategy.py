@@ -5,7 +5,7 @@ Data Loading Strategy
 Converted to JAX for TPU/XLA training.
 """
 
-import jax.numpy as jnp
+import numpy as np
 import random
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
@@ -63,7 +63,7 @@ class Strategy:
                 batch_size - cut_batch_x.shape[0], split,
                 deterministic_key+1 if deterministic_key is not None else None
             )
-            x = jnp.concatenate([cut_batch_x, x_addn], axis=0)
-            y = jnp.concatenate([cut_batch_y, y_addn], axis=0)
+            x = np.concatenate([cut_batch_x, x_addn], axis=0)
+            y = np.concatenate([cut_batch_y, y_addn], axis=0)
 
         return (x, y)

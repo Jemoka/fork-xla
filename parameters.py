@@ -7,6 +7,7 @@ parser.add_argument("experiment", help="name for the experiment", type=str)
 parser.add_argument('-v', '--verbose', action='count', default=0, help="log level")
 parser.add_argument("--wandb", default=False, action="store_true", help="whether to use wandb")
 parser.add_argument("--distributed", default=False, action="store_true", help="this is a GPU slice")
+parser.add_argument("--estimate_mfu", default=False, action="store_true", help="log flops and mfu")
 parser.add_argument("--warm_start", default=None, type=str, help="recover trainer from this path")
 parser.add_argument("--local-rank", "--local_rank", default=0, type=int, help="the local rank of this run")
 parser.add_argument("--flops_promised", default=989e12, type=float, help="how many flops does our hardware promise (for MFU measurements); default to H100")
@@ -54,4 +55,6 @@ parser.add_argument('--plan', nargs='+', help='layer plan; a number of \'fork\'/
 parser.add_argument("--merge_killed_tokens", default=False, action="store_true", help="merge killed tokens to the rightmost token")
 parser.add_argument("--averaging_method", type=str, choices=["residual", "logit", "rightmost"], default="residual", help="method for averaging forked tokens")
 
+# sharding configuration
+parser.add_argument("--shard_into", help="shard each large tensor into this many shards; number of chips must be divisible", type=int, default=4)
 

@@ -9,7 +9,7 @@ import click
 import random
 from tqdm import tqdm
 
-MEMMAP = "/home/houjun/bubbles/datasets/pes2o/train.bin"
+MEMMAP = "/home/houjun/data/datasets/pes2o/train.bin"
 
 data = np.memmap(MEMMAP, dtype=np.uint16, mode="r")
 
@@ -27,6 +27,7 @@ while lo < hi:
         hi = mid
     else:
         hi -= 1 # linear search, since our bst terminates when "its a run of 2 zeros"
+
 
 # truncate the file up to that index 
 print("truncating data...")

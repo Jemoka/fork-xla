@@ -24,11 +24,12 @@ from commands import configure
 
 args = configure(
     "test",
-    flops_promised=312e12,
-    report_interval=1,
+    flops_promised=275e12,
+    report_interval=16,
     # validation_interval=1,
-    data_file="/home/houjun/bubbles/recipes/pretrain.toml",
+    data_file="/home/houjun/data/recipes/pretrain.toml",
     block_size=512,
+    estimate_mfu=False,
     max_block_size=1024,
     plan = [
         "regular",
@@ -51,37 +52,51 @@ args = configure(
         "regular",
         "regular",
 
-        # "regular",
-        # "regular",
-        # "regular",
-        # "regular",
+        "regular",
+        "regular",
+        "regular",
+        "regular",
 
-        # "regular",
-        # "regular",
-        # "regular",
-        # "regular",
+        "regular",
+        "regular",
+        "regular",
+        "regular",
 
-        # "regular",
-        # "regular",
-        # "regular",
-        # "regular",
+        "regular",
+        "regular",
+        "regular",
+        "regular",
 
-        # "regular",
-        # "regular",
-        # "regular",
-        # "regular",
+        "regular",
+        "regular",
+        "regular",
+        "regular",
 
-        # "regular",
-        # "regular",
-        # "regular",
-        # "regular",
+        "regular",
+        "regular",
+        "regular",
+        "regular",
     ],
-    out_dir="/home/houjun/bubbles/checkpoints",
+    out_dir="/home/houjun/checkpoints",
     # per_device_batch_size=48, for h200s
     # per_device_batch_size=20, for a100s
-    per_device_batch_size=2, # for tpu-v4
-    batch_size=64, # so we don't insanely accumulate
+    per_device_batch_size=1, # for tpu-v4
+    # batch_size=64, # so we don't insanely accumulate
+    shard_into=4,
+    validation_steps=1024
 )
+
+# from flywheel import MemmapDataset
+
+# data = MemmapDataset(args, "/home/houjun/data-local/datasets/pes2o/")
+# x,y = data.get_batch(1024)
+
+# import tiktoken
+# enc = tiktoken.get_encoding("gpt2")
+
+# print(enc.decode_batch(x)[14])
+
+# args.validation_steps
 # spec = parse_dataset_spec("/juice2/scr2/houjun/fork/experiments/data/pretrain.toml", args)
 # x,y =spec.get_batch(3)
 # x
@@ -92,13 +107,36 @@ args = configure(
 # print(jax.devices())
 
 trainer = Trainer(args)
+trainer.train()
+# self = trainer
+# self = trainer
+
+# valid_step = self.make_valid_step()
+# # valid_step
+# result = valid_step(self.state)
+# print(result)
+# print(result)
+# print(result)
+
+
+# import time
+# a = time.time()
+# x,y = trainer.batch()
+# b = time.time()
+
+# b-a
+
+# x.shape
+
+# trainer.train()
+
 # self = trainer
 
 # from pathlib import Path
 # Path(trainer.recovery_dir).exists()
 # trainer.recovery_dir
 # !ls '/home/houjun/bubbles/checkpoints/test'
-trainer.train()
+# trainer.train()
 
 # x,y= trainer.batch()
 # print(x)

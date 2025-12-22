@@ -21,9 +21,6 @@ from argparse import Namespace
 import numpy as np
 import pandas as pd
 
-import jax
-import jax.numpy as jnp
-
 # logging
 from loguru import logger
 
@@ -93,8 +90,8 @@ class MemmapDataset(Dataset):
             ]
         )
 
-        # Convert to JAX arrays
-        x = jnp.array(x)
-        y = jnp.array(y)
+        # Convert to numpy arrays
+        x = np.array(x)
+        y = np.array(y)
 
         return x, y

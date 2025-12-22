@@ -70,8 +70,9 @@ class Trainer:
 
         # Compute replication mesh setup
         devices = np.array(jax.devices())
+        devices = devices.reshape(-1, args.shard_into)
 
-        self.ddp_mesh = Mesh(devices, axis_names=("batch",)) # DDP sharding, so batch dim goes to each device
+        self.mesh = Mesh(devices, axis_names=("batch", "shard")) # sharded data parallel
         self.replicas = devices.shape[0]
 
         # compute how much to accumulate
@@ -87,7 +88,7 @@ class Trainer:
         # print statistics
         if self.main_process():
             logger.info(
-                "BATCHING | {} batchsize/node * {} nodes * {} accumulation = {} batchsize",
+                "BATCHING | {} batchsize/node * {} dp * {} accumulation = {} batchsize",
                 self.per_device_batch_size,
                 self.replicas,
                 self.accumulate_steps,
@@ -199,9 +200,20 @@ class Trainer:
             tx=self.tx
         )
 
-        total = sum(x.size for x in jax.tree_util.tree_leaves(self.state.params)) / 1e6
+        # define sharding spces for data and parameters
+        # (accumulate, batch, seq_len)
+        # replicate accumulate steps, shard along "batch" mesh axes, replicate seq length
+        self.data_sharding = NamedSharding(self.mesh, P(None, "batch", None))
+        self.state_sharding = flax.linen.logical_to_mesh_sharding(
+            flax.linen.get_partition_spec(self.state), self.mesh, rules=SHARDING_PLAN
+        )
+
+        # Parameters goes to TPUs
+        self.state = jax.device_put(self.state, self.state_sharding)
+
+        self.total_params = sum(x.size for x in jax.tree_util.tree_leaves(self.state.params)) / 1e6
         if self.main_process():
-            logger.info(f"MODEL | Total Parameters: {total:.2f}m")
+            logger.info(f"MODEL | Total Parameters: {self.total_params:.2f}m")
 
         # compute training size + the counter (useful for mid-checkpoint recovery)
         self.global_step_counter_ = 0
@@ -231,7 +243,7 @@ class Trainer:
         # first estimate the number of flops we do per iteration.
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
         # Count parameters
-        N = sum(x.size for x in jax.tree_leaves(self.state.params))
+        N = self.total_params
         cfg = self.args
         L, H, Q, T = len(cfg.plan), cfg.n_head, cfg.n_embd // cfg.n_head, (cfg.max_block_size
                                                                            if "fork" in cfg.plan
@@ -274,87 +286,115 @@ class Trainer:
     def finish(self):
         pass  # noop
 
-    def val(self):
-        losses = []
-        scores = []
-        count = 0
-        for i in range(
-            0, vars(self.args).get("validation_steps", 256), self.per_device_batch_size
-        ):
-            # get a batch and inference (only on main process, so don't replicate)
-            x, y = self.batch("val", deterministic_key=i, replicate=False)
-
-            # Run validation step
-            logits, loss = self.state.apply_fn(
-                {'params': self.state.params},
-                x, y,
-                deterministic=True
+    def batch(self, slice="train", deterministic_key=None):
+        if slice == "train":
+            x, y = self.data_strategy.get_batch(
+                (self.per_device_batch_size*
+                self.replicas* # because we will then shard it
+                self.accumulate_steps), # because we will then accumulate it
+                slice,
+                deterministic_key=deterministic_key,
             )
-
-            # for pretraining, loss is just the inverse of the loss
-            losses.append(float(loss))
-            scores.append((1 / float(loss)) * x.shape[0])
-            count += x.shape[0]
-
-        loss = sum(losses) / len(losses)
-        score = sum(scores) / count
-        metrics = {"val/loss": loss, "val/score": score}
-
-        return score, metrics
-
-    def batch(self, slice="train", deterministic_key=None, accumulate=False, replicate=True):
-        accumulate_multiplier = self.accumulate_steps if accumulate else 1
-        device_multiplier = self.device_count() if replicate else 1
-        x, y = self.data_strategy.get_batch(
-            (self.per_device_batch_size*
-             device_multiplier* # because we will then shard it
-             accumulate_multiplier), # because we will then accumulate it
-            slice,
-            deterministic_key=deterministic_key,
-        )
+        else:
+            # we will load a number of samples divisble by per_device_batch_size
+            # so that we can reshape it so + enable batched loads
+            x, y = self.data_strategy.get_batch(
+                (self.args.validation_steps//(self.per_device_batch_size*self.replicas))*
+                (self.per_device_batch_size*self.replicas),
+                slice,
+                deterministic_key=deterministic_key,
+            )
 
         return x, y
 
 
-    @staticmethod
-    def train_step(state, batch, dropout_key, accumulate_steps):
+    def make_train_step(self):
 
-        def train_eval(state, batch, dropout_key, accumulate_steps):
-            """batch -> gradient"""
-            x, y = batch
+        def train_step_inner(state, batch, dropout_key, accumulate_steps):
 
-            def loss_fn(params):
-                logits, loss = state.apply_fn(
-                    {'params': params},
+            def train_eval(state, batch, dropout_key, accumulate_steps):
+                """batch -> gradient"""
+                x, y = batch
+
+                def loss_fn(params):
+                    logits, loss = state.apply_fn(
+                        {'params': params},
+                        x, y,
+                        deterministic=False,
+                        rngs={'dropout': dropout_key}
+                    )
+                    return loss / accumulate_steps
+
+                loss, grads = jax.value_and_grad(loss_fn)(state.params)
+
+                return loss, grads
+
+            def reduce(carry, batch):
+                """(gradient, loss) -> batch -> ((gradient_acc, loss_acc), None)"""
+
+                grad, loss = carry
+                loss_single, grad_single = train_eval(state, batch, dropout_key, accumulate_steps)
+
+                grad_acc = jax.tree_util.tree_map(lambda a, g: a + g, grad, grad_single)
+                loss_acc = loss + loss_single
+
+                return (grad_acc, loss_acc), None
+
+            grad_zero = jax.tree_util.tree_map(jnp.zeros_like, state.params)
+            (grad_sum, loss_sum), _ = jax.lax.scan(reduce, (grad_zero, 0.0), batch)
+
+            state = state.apply_gradients(grads=grad_sum)
+
+            return state, loss_sum
+
+        return jax.jit(
+            train_step_inner,
+            in_shardings=(self.state_sharding, self.data_sharding, None, None),
+            out_shardings=(self.state_sharding, None),
+        )
+
+    def make_valid_step(self):
+        x,y = self.batch("val", deterministic_key=32)
+
+        # reshape into (steps, per_device_bs*replicas, seq_len) and shard the middle axis
+        x = x.reshape(-1, self.per_device_batch_size*self.replicas, x.shape[-1])
+        y = y.reshape(-1, self.per_device_batch_size*self.replicas, y.shape[-1])
+        x,y = jax.device_put(
+            (x,y),
+            self.data_sharding
+        )
+
+        # because batch is fixed we should be jitting the inner function
+        def valid_step_inner(state, batch):
+
+            def reduce(loss, batch):
+                """loss -> batch -> (loss_acc, None)"""
+
+                x,y = batch
+
+                _, loss_partial = state.apply_fn(
+                    {'params': state.params},
                     x, y,
-                    deterministic=False,
-                    rngs={'dropout': dropout_key}
+                    deterministic=False
                 )
-                return loss / accumulate_steps
 
-            loss, grads = jax.value_and_grad(loss_fn)(state.params)
+                return (loss+loss_partial*x.shape[0]), None
 
-            return loss, grads
+            loss, _ = jax.lax.scan(reduce, 0.0, batch)
+            loss = loss/(batch[0].shape[0]*batch[0].shape[1]) # average over number of steps
+            score = float(1/loss)
+            metrics = {"val/loss": float(loss), "val/score": score}
 
-        def reduce(carry, batch):
-            """(gradient, loss) -> batch -> ((gradient_acc, loss_acc), None)"""
+            return score, metrics
 
-            grad, loss = carry
-            loss_single, grad_single = train_eval(state, batch, dropout_key, accumulate_steps)
+        valid_step_inner_jit = jax.jit(
+            valid_step_inner,
+            in_shardings=(self.state_sharding, self.data_sharding),
+            out_shardings=(None, None),
+        )
 
-            grad_acc = jax.tree_util.tree_map(lambda a, g: a + g, grad, grad_single)
-            loss_acc = loss + loss_single
+        return lambda state: valid_step_inner_jit(state, (x,y))
 
-            return (grad_acc, loss_acc), None
-
-        grad_zero = jax.tree_util.tree_map(jnp.zeros_like, state.params)
-        (grad_sum, loss_sum), _ = jax.lax.scan(reduce, (grad_zero, 0.0), batch)
-
-        state = state.apply_gradients(grads=grad_sum)
-
-        return state, loss_sum
-       
-    
     def epoch(self):
         if self.main_process():
             logger.info("BEGIN EPOCH")
@@ -363,11 +403,8 @@ class Trainer:
         mfu_start = time.time()
 
         # JIT compile + shard train step across workers 
-        train_step = jax.jit(
-            self.train_step,
-            in_shardings=(None, NamedSharding(self.ddp_mesh, P(None, "batch", None)), None, None),
-            out_shardings=(None, None),
-        )
+        train_step = self.make_train_step()
+        valid_step = self.make_valid_step()
 
         grads_accum = None
 
@@ -377,30 +414,33 @@ class Trainer:
             self.total_batches + 1,
             self.accumulate_steps
         ):
-            x,y = self.batch(accumulate=True)
+            logger.debug("DATA | {} | START", indx)
+            x,y = self.batch()
             x = x.reshape(
                 -1,
-                self.device_count()*self.per_device_batch_size,
+                self.replicas*self.per_device_batch_size,
                 self.args.block_size
             )
             y = y.reshape(
                 -1,
-                self.device_count()*self.per_device_batch_size,
+                self.replicas*self.per_device_batch_size,
                 self.args.block_size
             )
+            logger.debug("DATA | {} | PLACING", indx)
 
             batch = jax.device_put(
                 (x,y),
-                # accumulate steps, batchwise, seq length
-                NamedSharding(self.ddp_mesh, P(None, "batch", None))
-            )
+                self.data_sharding
 
-            state, loss = train_step(self.state, batch, self.dropout_key, self.accumulate_steps)
-            train_metrics = {"train/loss": float(loss)}
+            )
+            logger.debug("DATA | {} | PLACED", indx)
+
+            self.state, loss = train_step(self.state, batch, self.dropout_key, self.accumulate_steps)
+            logger.debug("COMPUTATION | {} | FINISHED", indx)
+            train_metrics = {}
 
             # Get current learning rate
-            train_metrics["train/lr"] = float(self.schedule(self.state.step))
-            mfu_measurement_step_counter += 1
+            mfu_measurement_step_counter += self.accumulate_steps
 
             # perform logging, and then increment
             if (
@@ -409,12 +449,13 @@ class Trainer:
                 % self.args.report_interval
                 == 0
                 and indx != 0
+                and self.main_process()
             ):
-                if mfu_measurement_step_counter > 0:
+                if mfu_measurement_step_counter > 0 and self.args.estimate_mfu:
                     mfu, flops = self.estimate_mfu(
                         mfu_measurement_step_counter
                         * self.per_device_batch_size
-                        * self.device_count(),
+                        * self.replicas,
                         time.time() - mfu_start,
                     )
                     mfu_start = time.time()
@@ -422,27 +463,31 @@ class Trainer:
                     train_metrics["train/mfu"] = mfu
                     train_metrics["train/flops"] = flops
 
+                train_metrics["train/lr"] = float(self.schedule(self.state.step))
                 train_metrics["train/tokens"] = (
                     (((indx+1) // self.accumulate_steps)*
                      self.args.batch_size*self.args.block_size)
                 )
+                # this takes quite a while ~2secs+network actually to gather
+                loss_val = float(loss)
+                train_metrics["train/loss"] = loss_val
 
-                if self.main_process():
-                    wandb.log(
-                        train_metrics,
-                        step=indx // self.accumulate_steps,
-                    )
-                    logger.info(
-                        "TRAIN | {}/{} | loss {}",
-                        indx // self.accumulate_steps,
-                        self.total_batches // self.accumulate_steps,
-                        float(loss),
-                    )
+                wandb.log(
+                    train_metrics,
+                    step=indx // self.accumulate_steps,
+                )
+                logger.info(
+                    "TRAIN | {}/{} | loss {}",
+                    indx // self.accumulate_steps,
+                    self.total_batches // self.accumulate_steps,
+                    loss_val,
+                )
+
             if (indx % self.accumulate_steps == 0):
-                self.global_step_counter_ += 1
+                self.global_step_counter_ += self.accumulate_steps
 
             if self.main_process():
-                logger.debug("STEP | {} | {}", indx, train_metrics)
+                logger.debug("STEP | {}", indx)
 
             # save a checkpoint, if needed
             if (
@@ -463,7 +508,7 @@ class Trainer:
                     == 0
             ):
                 if self.main_process():
-                    score, val_metrics = self.val()
+                    score, val_metrics = valid_step()
                     wandb.log(
                         val_metrics,
                         step=indx // self.accumulate_steps,
@@ -491,7 +536,7 @@ class Trainer:
         # Load checkpoint using Orbax
         checkpointer = ocp.PyTreeCheckpointer()
         restored = checkpointer.restore(os.path.join(path, "checkpoint"))
-        self.state = restored["state"]
+        self.state = jax.device_put(restored["state"], self.state_sharding)
 
         # Load config
         with open(os.path.join(path, "config.json"), "r") as df:

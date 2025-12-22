@@ -48,7 +48,7 @@ class RotaryPosEncoding:
         return (x * cos) + (self.rotate_half(x) * sin)
 
     def apply_rotary_pos_emb(self, q: jnp.ndarray, k: jnp.ndarray, sin: jnp.ndarray,
-                            cos: jnp.ndarray, seq_dim: int, offset: int) -> Tuple[jnp.ndarray, jnp.ndarray]:
+                             cos: jnp.ndarray, seq_dim: int, offset: int) -> Tuple[jnp.ndarray, jnp.ndarray]:
         return self.apply_rot(q, sin, cos, seq_dim, offset), self.apply_rot(k, sin, cos, seq_dim, 0)
 
     def get(self, x: jnp.ndarray, t: Optional[jnp.ndarray] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
@@ -75,7 +75,7 @@ class RotaryPosEncoding:
         return sin, cos
 
     def __call__(self, q: jnp.ndarray, k: jnp.ndarray, pos_offset: int = 0,
-                t: Optional[jnp.ndarray] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
+                 t: Optional[jnp.ndarray] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
         sin, cos = self.get(k, t)
         return self.apply_rotary_pos_emb(q, k, sin, cos, self.seq_dim, pos_offset)
 
@@ -117,6 +117,7 @@ class CausalSelfAttention(nn.Module):
         self.n_head = self.config.n_head
         self.n_embd = self.config.n_embd
         self.dropout_rate = self.config.dropout
+        self.xavier = jax.nn.initializers.xavier_normal()
 
         # Initialize RoPE
         self.rope = RotaryPosEncoding(self.config.n_embd // self.config.n_head, seq_dim=-2)
@@ -125,7 +126,7 @@ class CausalSelfAttention(nn.Module):
         self.c_attn = nn.Dense(
             3 * self.n_embd,
             use_bias=self.config.bias,
-            kernel_init=jax.nn.initializers.xavier_normal(),
+            kernel_init=nn.with_partitioning(self.xavier, ('n_embd', 'n_attn')),
             param_dtype=jnp.float32,
             dtype=jnp.bfloat16
         )
@@ -134,7 +135,7 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Dense(
             self.n_embd,
             use_bias=self.config.bias,
-            kernel_init=jax.nn.initializers.xavier_normal(),
+            kernel_init=nn.with_partitioning(self.xavier, ('n_embd', 'n_embd_out')),
             param_dtype=jnp.float32,
             dtype=jnp.bfloat16
         )
@@ -227,20 +228,20 @@ class MLP(nn.Module):
     config: any
 
     def setup(self):
-        # First linear layer
+        self.xavier = jax.nn.initializers.xavier_normal()
+
         self.c_fc = nn.Dense(
             4 * self.config.n_embd,
             use_bias=self.config.bias,
-            kernel_init=jax.nn.initializers.xavier_normal(),
+            kernel_init=nn.with_partitioning(self.xavier, ('n_embd', 'n_embd_ff')),
             param_dtype=jnp.float32,
             dtype=jnp.bfloat16
         )
 
-        # Second linear layer
         self.c_proj = nn.Dense(
             self.config.n_embd,
             use_bias=self.config.bias,
-            kernel_init=jax.nn.initializers.xavier_normal(),
+            kernel_init=nn.with_partitioning(self.xavier, ('n_embd_ff', 'n_embd')),
             param_dtype=jnp.float32,
             dtype=jnp.bfloat16
         )
@@ -267,13 +268,13 @@ class Block(nn.Module):
         self.mlp = MLP(self.config)
 
     def __call__(self, x, cumulative_scores, token_index, padding_mask=None,
-                layer_num=None, deterministic=False):
+                 layer_num=None, deterministic=False):
         exponentiated_scores = jnp.exp(cumulative_scores)
         x = x + jnp.einsum("bl,blh->blh", exponentiated_scores,
-                          self.attn(self.ln_1(x), cumulative_scores, token_index,
-                                   padding_mask=padding_mask, deterministic=deterministic))
+                           self.attn(self.ln_1(x), cumulative_scores, token_index,
+                                     padding_mask=padding_mask, deterministic=deterministic))
         x = x + jnp.einsum("bl,blh->blh", exponentiated_scores,
-                          self.mlp(self.ln_2(x), deterministic=deterministic))
+                           self.mlp(self.ln_2(x), deterministic=deterministic))
         return x
 
 
@@ -281,6 +282,8 @@ class ForkingBlock(nn.Module):
     config: any
 
     def setup(self):
+        self.xavier = jax.nn.initializers.xavier_normal()
+
         self.ln_1 = LayerNorm(self.config.n_embd, bias=self.config.bias)
         self.attn = CausalSelfAttention(self.config)
         self.ln_2 = LayerNorm(self.config.n_embd, bias=self.config.bias)
@@ -292,7 +295,7 @@ class ForkingBlock(nn.Module):
         self.forking_score = nn.Dense(
             2,
             use_bias=False,
-            kernel_init=jax.nn.initializers.xavier_normal(),
+            kernel_init=nn.with_partitioning(self.xavier, ('n_embd', 'n_fork')),
             param_dtype=jnp.float32,
             dtype=jnp.bfloat16
         )
@@ -346,9 +349,14 @@ class ForkingBlock(nn.Module):
         x_to_consider = x[batch_indices, orig_indices, :]  # (batch_size, k, n_embd)
 
         # Add fork embedding
-        fork_embedding = self.param('fork_embedding',
-                                   lambda rng, shape: jax.random.normal(rng, shape) * (1 / jnp.sqrt(self.config.n_embd)),
-                                   (self.config.n_embd,))
+        fork_embedding = self.param(
+            'fork_embedding',
+            nn.with_partitioning(
+                lambda rng, shape: jax.random.normal(rng, shape) * (1 / jnp.sqrt(self.config.n_embd)),
+                ('n_embd',)
+            ),
+            (self.config.n_embd,)
+        )
 
         x_to_consider = x_to_consider + (is_fork[:, :, None].astype(x.dtype) * fork_embedding.astype(jnp.bfloat16))
 
@@ -359,26 +367,17 @@ class ForkingBlock(nn.Module):
         return x_to_consider, new_cumulative_scores, new_token_indices
 
     def __call__(self, x, cumulative_scores, token_index, padding_mask=None,
-                layer_num=None, deterministic=False):
+                 layer_num=None, deterministic=False):
         # Fork first
         x, cumulative_scores, token_index = self.fork(x, cumulative_scores, token_index)
-
-        if not self.config.compiled:
-            # Plotting (host callback for non-jitted mode)
-            plot(
-                "forking",
-                cumulative_scores=cumulative_scores,
-                token_index=token_index,
-                key=layer_num
-            )
 
         # Then normal block forward
         exponentiated_scores = jnp.exp(cumulative_scores)
         x = x + jnp.einsum("bl,blh->blh", exponentiated_scores,
-                          self.attn(self.ln_1(x), cumulative_scores, token_index,
-                                   padding_mask=padding_mask, deterministic=deterministic))
+                           self.attn(self.ln_1(x), cumulative_scores, token_index,
+                                     padding_mask=padding_mask, deterministic=deterministic))
         x = x + jnp.einsum("bl,blh->blh", exponentiated_scores,
-                          self.mlp(self.ln_2(x), deterministic=deterministic))
+                           self.mlp(self.ln_2(x), deterministic=deterministic))
 
         return x, cumulative_scores, token_index
 
@@ -410,7 +409,10 @@ class Thoughtbubbles(nn.Module):
         # Shared token embedding table: (vocab, d_model)
         wte = self.param(
             "wte",
-            nn.initializers.normal(stddev=0.02),
+            nn.with_partitioning(
+                nn.initializers.normal(stddev=0.02),
+                ('vocab', 'n_embd')
+            ),
             (self.config.vocab_size, self.config.n_embd),
             jnp.float32
         )
@@ -514,7 +516,7 @@ class Thoughtbubbles(nn.Module):
         optimizer = optax.chain(
             optax.clip_by_global_norm(1.0),
             optax.adamw(learning_rate=learning_rate, b1=betas[0], b2=betas[1],
-                       weight_decay=weight_decay)
+                        weight_decay=weight_decay)
         )
 
         logger.info(f"OPTIMIZER | using AdamW")
@@ -529,3 +531,15 @@ class Thoughtbubbles(nn.Module):
 
         logger.info(f"OPTIMIZER | using Muon {'distributed' if distributed else 'single device'}")
         return optimizer
+
+# map logical axes to device axes
+SHARDING_PLAN = (
+    ('n_embd', 'shard'), 
+    ('n_embd_out', None), 
+    ('n_embd_ff', None), # for an upproj, we shard along input axis
+    ('n_attn', None),
+    ('n_fork', None),
+    ('vocab', None),
+)
+
+    
