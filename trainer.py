@@ -382,18 +382,24 @@ class Trainer:
 
             loss, _ = jax.lax.scan(reduce, 0.0, batch)
             loss = loss/(batch[0].shape[0]*batch[0].shape[1]) # average over number of steps
-            score = float(1/loss)
-            metrics = {"val/loss": float(loss), "val/score": score}
 
-            return score, metrics
+            return loss
 
         valid_step_inner_jit = jax.jit(
             valid_step_inner,
             in_shardings=(self.state_sharding, self.data_sharding),
-            out_shardings=(None, None),
+            out_shardings=None,
         )
 
-        return lambda state: valid_step_inner_jit(state, (x,y))
+
+        def valid_step_wrapper(state):
+            loss = float(valid_step_inner_jit(state, (x,y)))
+            score = 1/loss
+            metrics = {"val/loss": loss, "val/score": score}
+
+            return score, metrics
+
+        return valid_step_wrapper
 
     def epoch(self):
         if self.main_process():
