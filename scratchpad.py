@@ -25,7 +25,7 @@ from commands import configure
 args = configure(
     "test",
     flops_promised=275e12,
-    report_interval=16,
+    report_interval=2,
     # validation_interval=1,
     data_file="/home/houjun/data/recipes/pretrain.toml",
     block_size=512,
@@ -80,7 +80,7 @@ args = configure(
     out_dir="/home/houjun/checkpoints",
     # per_device_batch_size=48, for h200s
     # per_device_batch_size=20, for a100s
-    per_device_batch_size=4, # for tpu-v4
+    per_device_batch_size=32, # for tpu-v4
     # batch_size=64, # so we don't insanely accumulate
     shard_into=4,
     validation_steps=1024
@@ -107,7 +107,9 @@ args = configure(
 # print(jax.devices())
 
 trainer = Trainer(args)
-trainer.train()
+# trainer.train()
+# res = trainer.make_valid_step()()
+trainer.estimate_mfu
 # self = trainer
 # self = trainer
 
