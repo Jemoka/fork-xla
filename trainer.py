@@ -487,7 +487,7 @@ class Trainer:
                 self.global_step_counter_ += self.accumulate_steps
 
             if self.main_process():
-                logger.debug("STEP | {}", indx)
+                logger.debug("STEP | {} | {}", indx, train_metrics)
 
             # save a checkpoint, if needed
             if (
