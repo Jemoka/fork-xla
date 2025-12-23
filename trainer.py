@@ -113,7 +113,7 @@ class Trainer:
         # initialize wandb
         if self.main_process():
             wandb.init(
-                project="fork",
+                project="fork-xla",
                 config=vars(args),
                 mode=None if args.wandb else "disabled",
                 name=args.experiment,
