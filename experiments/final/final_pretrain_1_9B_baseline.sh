@@ -3,13 +3,13 @@
 #SBATCH --account=nlp
 #SBATCH --partition=sphinx
 #SBATCH --job-name=houjun-forking-final_pretrain_1_9b_baseline
-#SBATCH --nodes=1-6
-#SBATCH --gpus-per-node=2
+#SBATCH --nodes=1-2
+#SBATCH --gpus-per-node=6
 #SBATCH --ntasks-per-node=1
 #SBATCH --requeue
 #SBATCH --mem=64G
 #SBATCH --time=14-0
-#SBATCH --exclude=sphinx1,sphinx2,sphinx9,sphinx10,sphinx11
+#SBATCH --nodelist=sphinx11,sphinx10
 #SBATCH --open-mode=append
 #SBATCH --output=./logs/final_pretrain_1_9b_baseline.log
 
@@ -52,7 +52,7 @@ srun --export=ALL bash -lc '
       --flops_promised 312e12 \
       --block_size 512 \
       --max_block_size 1024 \
-      --per_device_batch_size 10 \
+      --per_device_batch_size 18 \
       --n_head 16 \
       --n_embd 2048 \
       --out_dir /sphinx/u/houjun/checkpoints/fork \
