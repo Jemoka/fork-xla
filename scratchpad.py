@@ -29,7 +29,6 @@ args = configure(
     # validation_interval=1,
     data_file="/home/houjun/data/recipes/pretrain.toml",
     block_size=512,
-    estimate_mfu=False,
     max_block_size=1024,
     plan = [
         "regular",
@@ -108,8 +107,8 @@ args = configure(
 
 trainer = Trainer(args)
 # trainer.train()
-# res = trainer.make_valid_step()()
-trainer.estimate_mfu
+res = trainer.make_valid_step()(trainer.state)
+# trainer.args.estimate_mfu
 # self = trainer
 # self = trainer
 
