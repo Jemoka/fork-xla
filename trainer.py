@@ -234,6 +234,9 @@ class Trainer:
         if self.main_process():
             logger.info(self.model)
 
+        # dataloader cache
+        self.async_dl_cache = {}
+
     def estimate_mfu(self, fwdbwd_per_iter, dt):
         """estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS"""
         # Chowdhery et al., 2022
@@ -288,13 +291,17 @@ class Trainer:
 
     def batch(self, slice="train", deterministic_key=None):
         if slice == "train":
-            x, y = self.data_strategy.get_batch(
-                (self.per_device_batch_size*
-                self.replicas* # because we will then shard it
-                self.accumulate_steps), # because we will then accumulate it
-                slice,
-                deterministic_key=deterministic_key,
-            )
+            strategy = self.async_dl_cache.get("train")
+            if not strategy:
+                self.async_dl_cache["train"] = self.data_strategy.get_async_batches(
+                    self.per_device_batch_size *
+                    self.replicas *
+                    self.accumulate_steps,
+                    slice
+                )
+                strategy = self.async_dl_cache["train"]
+
+            x,y = strategy.get_batch()
         else:
             # we will load a number of samples divisble by per_device_batch_size
             # so that we can reshape it so + enable batched loads
