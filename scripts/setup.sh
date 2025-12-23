@@ -30,3 +30,27 @@ popd
 # transparent hugepages
 sudo sh -c "echo always > /sys/kernel/mm/transparent_hugepage/enabled"
 
+# magic?!
+
+set -euo pipefail
+
+pushd ~/fork-xla
+
+uv run main.py   test \
+ -vv \
+ --distributed \
+ --warm_start /home/houjun/checkpoints/test/recovery \
+--data_file /home/houjun/data/recipes/pretrain.toml \
+--plan regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular regular \
+ --flops_promised 918e12 \
+--block_size 512 \
+--n_head 16 \
+--out_dir /home/houjun/checkpoints \
+--validation_interval 2048 \
+--checkpoint_interval 10240 \
+--per_device_batch_size 32 \
+--validation_steps 2048 \
+--shard_into 4 \
+--report_interval 1
+
+popd
