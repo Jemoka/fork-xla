@@ -108,6 +108,21 @@ class LayerNorm(nn.Module):
             return weight_cast * x_norm
 
 
+ATTN_DTYPE = jnp.bfloat16 
+
+
+@jax.jit(static_argnums=0)
+def causal_bias(max_block_size):
+    neg = jnp.array(-jnp.inf, ATTN_DTYPE)
+    m = jnp.tril(jnp.ones((max_block_size, max_block_size), dtype=jnp.bool_))
+    return jnp.where(m, jnp.array(0, ATTN_DTYPE), neg)[None, None, :, :]
+
+@jax.jit
+def key_padding_bias(padding_mask):
+    neg = jnp.array(-jnp.inf, ATTN_DTYPE)
+    keep = padding_mask.astype(jnp.bool_)[:, None, None, :]  # (B,1,1,T)
+    return jnp.where(keep, jnp.array(0, ATTN_DTYPE), neg)
+
 class CausalSelfAttention(nn.Module):
     config: any
 
@@ -143,7 +158,6 @@ class CausalSelfAttention(nn.Module):
     @nn.compact
     def __call__(self, x, cumulative_scores, token_index, padding_mask=None, deterministic=False):
         # sometimes peolpe do float32 attn, idk
-        ATTN_DTYPE = jnp.bfloat16 
 
         B, T, C = x.shape
 
@@ -173,32 +187,14 @@ class CausalSelfAttention(nn.Module):
             q = q.at[:, :, :, -1].set(jnp.ones_like(q[:, :, :, -1]))
             k = k.at[:, :, :, -1].set(jnp.repeat(cumulative_scores[:, None, :], k.shape[1], axis=1))
 
-        # Build causal attention mask
-        mask_key = (q.shape[-2], k.shape[-2])
-        causal_mask = jnp.tril(jnp.ones((q.shape[-2], k.shape[-2]), dtype=jnp.bool_))
-        causal_mask = jnp.where(causal_mask,
-                                jnp.zeros_like(causal_mask, dtype=ATTN_DTYPE),
-                                jnp.full_like(causal_mask, float("-inf"), dtype=ATTN_DTYPE))
-        causal_mask = jnp.repeat(causal_mask[None, :, :], B, axis=0)
-        mask = causal_mask
-
-        # Add padding mask if necessary
+        mask = causal_bias(self.config.max_block_size)
+        mask = mask[:,:,:q.shape[-2],:k.shape[-2]]
+        
         if padding_mask is not None:
-            padding_mask = jnp.take_along_axis(padding_mask, token_index, axis=1)
-            padding_mask_fl = padding_mask.astype(ATTN_DTYPE)
-            padding_mask_outer = padding_mask_fl[:, :, None] @ padding_mask_fl[:, None, :]
-            padding_mask_additive = jnp.where(
-                padding_mask_outer.astype(jnp.bool_),
-                jnp.zeros_like(padding_mask_outer, dtype=ATTN_DTYPE),
-                jnp.full_like(padding_mask_outer, float("-inf"), dtype=ATTN_DTYPE)
-            )
-            mask = mask + padding_mask_additive
+            mask = mask + key_padding_bias(padding_mask)
 
         # Attenuate v values with cumulative scores
         v = jnp.einsum("bnlh,bl->bnlh", v, jnp.exp(cumulative_scores))
-
-        # Scaled dot-product attention
-        mask_4d = jnp.repeat(mask[:, None, :, :], self.n_head, axis=1)
 
         # Use JAX's optimized attention
         # expects (batch x seq x heads x hidden), so we permute back from (b, nH, T, hs)
@@ -206,7 +202,7 @@ class CausalSelfAttention(nn.Module):
             query=q.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
             key=k.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
             value=v.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
-            bias=mask_4d
+            bias=mask
         )
 
         if not deterministic:
@@ -222,7 +218,6 @@ class CausalSelfAttention(nn.Module):
             y = nn.Dropout(rate=self.dropout_rate)(y, deterministic=False)
 
         return y
-
 
 class MLP(nn.Module):
     config: any
