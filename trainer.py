@@ -610,12 +610,12 @@ class Trainer:
                 )
             logger.debug("CHECKPOINT | saved configuration")
 
-        multihost_utils.sync_global_devices("post_save")
+        multihost_utils.sync_global_devices("save:post")
 
-        # Main process moves from temp to final location
+        # Main process copies from temp to final location (cross-device safe)
         if self.main_process():
             shutil.rmtree(path, ignore_errors=True)
-            shutil.move(temp_path, path)
+            shutil.copytree(temp_path, path, dirs_exist_ok=True, ignore_dangling_symlinks=True)
             logger.debug("CHECKPOINT | moved to {}", path)
 
     @classmethod
