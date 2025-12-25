@@ -553,7 +553,7 @@ class Trainer:
         # Load checkpoint using Orbax
         checkpointer = ocp.PyTreeCheckpointer()
         restored = checkpointer.restore(os.path.join(path, "checkpoint"))
-        self.state = jax.device_put(restored["state"], self.state_sharding)
+        self.state = self.state.replace(**restored["state"])
 
         # Load config
         with open(os.path.join(path, "config.json"), "r") as df:
