@@ -568,11 +568,12 @@ class Trainer:
 
         multihost_utils.sync_global_devices("pre_save")
 
-        logger.debug("CHECKPOINT | ready to save")
+        # Write to fast local temp, then move to final (possibly slow) path
+        import tempfile
+        temp_path = os.path.join(tempfile.gettempdir(), f"checkpoint_{os.path.basename(path)}_{time.time()}")
 
         if self.main_process():
-
-            os.makedirs(path, exist_ok=True)
+            os.makedirs(temp_path, exist_ok=True)
             logger.debug("CHECKPOINT | created checkpoint directory")
 
             # Save random state
@@ -581,22 +582,19 @@ class Trainer:
                 "numpy_random": np.random.get_state(),
                 "jax_random": int(self.key[0]),  # Save seed
             }
-            np.save(os.path.join(path, "rng.npy"), rng_state)
-            logger.debug("CHECKPOINT | saved random state")
+            np.save(os.path.join(temp_path, "rng.npy"), rng_state)
 
-        # Save checkpoint 
+        # Save checkpoint
         checkpointer = ocp.PyTreeCheckpointer()
         checkpointer.save(
-            os.path.join(path, "checkpoint"),
+            os.path.join(temp_path, "checkpoint"),
             {'state': jax.device_get(self.state)},
             force=True
         )
 
-        logger.debug("CHECKPOINT | saved training state")
-
         if self.main_process():
             # Save config
-            with open(os.path.join(path, "config.json"), "w") as df:
+            with open(os.path.join(temp_path, "config.json"), "w") as df:
                 json.dump(
                     {
                         "config": vars(self.args),
@@ -606,11 +604,14 @@ class Trainer:
                     },
                     df,
                 )
-            logger.debug("CHECKPOINT | saved config")
 
-        logger.debug("CHECKPOINT | blocking until save is over")
         multihost_utils.sync_global_devices("post_save")
-        logger.debug("CHECKPOINT | finished save, moving on...")
+
+        # Main process moves from temp to final location
+        if self.main_process():
+            shutil.rmtree(path, ignore_errors=True)
+            shutil.move(temp_path, path)
+            logger.debug("CHECKPOINT | moved to {}", path)
 
     @classmethod
     def from_pretrained(cls, path, disable_wandb=True, distributed=False):
