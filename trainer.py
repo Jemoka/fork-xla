@@ -587,7 +587,7 @@ class Trainer:
         checkpointer = ocp.PyTreeCheckpointer()
         checkpointer.save(
             os.path.join(path, "checkpoint"),
-            {'state': self.state},
+            {'state': jax.device_get(self.state)},
             force=True
         )
 
