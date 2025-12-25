@@ -554,7 +554,7 @@ class Trainer:
 
         # Load checkpoint using Orbax
         checkpointer = ocp.PyTreeCheckpointer()
-        restored = checkpointer.restore(os.path.join(path, "checkpoint"))
+        restored = checkpointer.restore(os.path.join(path, "checkpoint"), target={'state': self.state})
         self.state = self.state.replace(**restored["state"])
 
         # Load config
