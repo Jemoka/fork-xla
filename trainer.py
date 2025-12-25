@@ -583,6 +583,7 @@ class Trainer:
                 "jax_random": int(self.key[0]),  # Save seed
             }
             np.save(os.path.join(temp_path, "rng.npy"), rng_state)
+            logger.debug("CHECKPOINT | saved random state")
 
         # Save checkpoint
         checkpointer = ocp.PyTreeCheckpointer()
@@ -591,6 +592,7 @@ class Trainer:
             {'state': jax.device_get(self.state)},
             force=True
         )
+        logger.debug("CHECKPOINT | saved training state")
 
         if self.main_process():
             # Save config
@@ -604,6 +606,7 @@ class Trainer:
                     },
                     df,
                 )
+            logger.debug("CHECKPOINT | saved configuration")
 
         multihost_utils.sync_global_devices("post_save")
 
