@@ -275,7 +275,7 @@ class Trainer:
             self.epoch()
         except Exception as e:
             if self.main_process():
-                logger.info(f"TRAIN | FAILURE | building recovery checkpoint")
+                logger.info(f"TRAIN | FAILURE | building recovery checkpoint for {e}")
             try:
                 # move recovery checkpoint to self.recovery_dir+"_last_good"
                 shutil.rmtree(self.recovery_dir.removesuffix("/")+"_last_good", ignore_errors=True)
