@@ -466,8 +466,10 @@ class Trainer:
                 % self.args.report_interval
                 == 0
                 and indx != 0
-                and self.main_process()
             ):
+                multihost_utils.sync_global_devices("report:pre")
+                train_metrics["train/lr"] = float(self.schedule(self.state.step))
+                loss_val = float(loss)
                 if mfu_measurement_step_counter > 0 and self.args.estimate_mfu:
                     mfu, flops = self.estimate_mfu(
                         mfu_measurement_step_counter
@@ -480,25 +482,24 @@ class Trainer:
                     train_metrics["train/mfu"] = mfu
                     train_metrics["train/flops"] = flops
 
-                train_metrics["train/lr"] = float(self.schedule(self.state.step))
-                train_metrics["train/tokens"] = (
-                    (((indx+1) // self.accumulate_steps)*
-                     self.args.batch_size*self.args.block_size)
-                )
-                # this takes quite a while ~2secs+network actually to gather
-                loss_val = float(loss)
-                train_metrics["train/loss"] = loss_val
+                if self.main_process():
+                    train_metrics["train/tokens"] = (
+                        (((indx+1) // self.accumulate_steps)*
+                        self.args.batch_size*self.args.block_size)
+                    )
+                    train_metrics["train/loss"] = loss_val
 
-                wandb.log(
-                    train_metrics,
-                    step=indx // self.accumulate_steps,
-                )
-                logger.info(
-                    "TRAIN | {}/{} | loss {}",
-                    indx // self.accumulate_steps,
-                    self.total_batches // self.accumulate_steps,
-                    loss_val,
-                )
+                    wandb.log(
+                        train_metrics,
+                        step=indx // self.accumulate_steps,
+                    )
+                    logger.info(
+                        "TRAIN | {}/{} | loss {}",
+                        indx // self.accumulate_steps,
+                        self.total_batches // self.accumulate_steps,
+                        loss_val,
+                    )
+                multihost_utils.sync_global_devices("report:post")
 
             if (indx % self.accumulate_steps == 0):
                 self.global_step_counter_ += self.accumulate_steps
@@ -524,8 +525,8 @@ class Trainer:
                     % self.args.validation_interval
                     == 0
             ):
+                score, val_metrics = valid_step()
                 if self.main_process():
-                    score, val_metrics = valid_step()
                     wandb.log(
                         val_metrics,
                         step=indx // self.accumulate_steps,
@@ -536,10 +537,11 @@ class Trainer:
                         score,
                     )
 
-                    if score > self.best_val_score_:
+                if score > self.best_val_score_:
+                    if self.main_process():
                         logger.info("VAL | BEST SCORE | score {}", score)
-                        self.best_val_score_ = score
-                        self.save(self.best_dir)
+                    self.best_val_score_ = score
+                    self.save(self.best_dir)
 
     def load(self, path):
         logger.debug("CHECKPOINT | loading checkpoint from {}", path)
@@ -566,7 +568,7 @@ class Trainer:
     def save(self, path):
         logger.debug("CHECKPOINT | saving checkpoint at {}", path)
 
-        multihost_utils.sync_global_devices("pre_save")
+        multihost_utils.sync_global_devices("save:pre")
 
         # Write to fast local temp, then move to final (possibly slow) path
         import tempfile
