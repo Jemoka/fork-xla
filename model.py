@@ -270,7 +270,7 @@ class Block(nn.Module):
                                      padding_mask=padding_mask, deterministic=deterministic))
         x = x + jnp.einsum("bl,blh->blh", exponentiated_scores,
                            self.mlp(self.ln_2(x), deterministic=deterministic))
-        return x
+        return x, cumulative_scores, token_index
 
 
 class ForkingBlock(nn.Module):
@@ -303,23 +303,21 @@ class ForkingBlock(nn.Module):
     @nn.compact
     def fork(self, x, cumulative_scores, token_index):
         """Top-k forking implementation"""
-        batch_size = cumulative_scores.shape[0]
+
+        batch_size = cumulative_scores.shape[0] # (batch_size, k)
 
         # Compute current layer's forking scores
-        curr_layer_forking_score = self.forking_score(self.forking_ln(x))
+        curr_layer_forking_score = self.forking_score(self.forking_ln(x)) # (batch_size, k, 2)
 
         # Update cumulative scores (in log space)
         forking_scores_cum = (
             self.clipped_logsigmoid(curr_layer_forking_score) +
-            cumulative_scores[:, :, None]
-        ).reshape(batch_size, -1)
+            cumulative_scores[:, :, None] # (batch_size, k, 1)
+        ).reshape(batch_size, -1) # (batch_size, 2k)
         forking_scores_cum_for_topk = forking_scores_cum
 
         # Copy token index twice (for original and fork)
-        forked_token_index = (
-            jnp.repeat(token_index[:, :, None], 2, axis=-1)
-            .reshape(batch_size, -1)
-        )
+        forked_token_index = token_index.repeat(2, axis=-1)
 
         # Mark rightmost token of each original token with +inf (always keep)
         rolled = jnp.roll(forked_token_index, -1, axis=-1)
@@ -332,12 +330,12 @@ class ForkingBlock(nn.Module):
 
         # Perform top-k selection
         k = min(self.config.max_block_size, forking_scores_cum_for_topk.shape[-1])
-        top_k_values, top_k_indices = lax.top_k(forking_scores_cum_for_topk, k)
+        _, top_k_indices = lax.top_k(forking_scores_cum_for_topk, k)
         top_k_indices = jnp.sort(top_k_indices, axis=-1)
 
         # Gather based on indices that survived
         orig_indices = top_k_indices // 2  # (batch_size, k)
-        is_fork = (top_k_indices % 2) == 0  # 0: fork, 1: orig
+        is_fork = (top_k_indices % 2) == 0  # 0: fork, 1: orig (batch_size, k)
 
         # Gather x values
         batch_indices = jnp.arange(batch_size)[:, None]
@@ -351,13 +349,13 @@ class ForkingBlock(nn.Module):
                 ('n_embd',)
             ),
             (self.config.n_embd,)
-        )
+        ).astype(jnp.bfloat16)
 
-        x_to_consider = x_to_consider + (is_fork[:, :, None].astype(x.dtype) * fork_embedding.astype(jnp.bfloat16))
+        x_to_consider = x_to_consider + (is_fork[:, :, None].astype(x.dtype) * fork_embedding)
 
         # Gather cumulative scores and token indices
         new_cumulative_scores = jnp.take_along_axis(forking_scores_cum, top_k_indices, axis=-1)
-        new_token_indices = jnp.take_along_axis(forked_token_index, orig_indices, axis=-1)
+        new_token_indices = jnp.take_along_axis(token_index, orig_indices, axis=-1)
 
         return x_to_consider, new_cumulative_scores, new_token_indices
 
@@ -375,7 +373,6 @@ class ForkingBlock(nn.Module):
                            self.mlp(self.ln_2(x), deterministic=deterministic))
 
         return x, cumulative_scores, token_index
-
 
 class Thoughtbubbles(nn.Module):
     config: any
@@ -427,39 +424,44 @@ class Thoughtbubbles(nn.Module):
 
         # Transformer blocks
         for indx, (plan, block) in enumerate(zip(self.config.plan, self.blocks)):
-            if "fork" in plan:
-                x, cumulative_scores, token_index = block(
-                    x, cumulative_scores, token_index,
-                    padding_mask=padding_mask,
-                    layer_num=indx,
-                    deterministic=deterministic
-                )
-            else:
-                x = block(
-                    x, cumulative_scores, token_index,
-                    padding_mask=padding_mask,
-                    layer_num=indx,
-                    deterministic=deterministic
-                )
+            x, cumulative_scores, token_index = block(
+                x, cumulative_scores, token_index,
+                padding_mask=padding_mask,
+                layer_num=indx,
+                deterministic=deterministic
+            )
+
 
         # Final layer norm
+        # jax.debug.print("{}", x[0].mean())
+        # jax.debug.print("{} {}", x[0].mean(), x.dtype)
+        # chickens = self.param('chickens', nn.initializers.ones, (self.config.n_embd,))
+        # mean = jnp.mean(x, axis=-1, keepdims=True)
+        # var = jnp.var(x, axis=-1, keepdims=True)
+        # x_norm = (x - mean) / jnp.sqrt(var + 1e-5)
+
+        # jax.debug.print("{} {}", x[0].astype(jnp.float32).sum(), x.dtype)
         x = self.ln_f(x)
+        # jax.debug.print("{} {}", x[0].mean(), x.dtype)
 
         # Compute logits based on sequence length and averaging method
-        if x.shape[1] == self.config.block_size:
+        if x.shape[1] == idx.shape[-1]:
             logits = jnp.einsum("blh,vh->blv", x, wte.astype(jnp.bfloat16))
         else:
             # Apply the selected averaging method
             if self.config.averaging_method == "logit":
-                logits = self.logit_average(jnp.einsum("blh,vh->blv", x, wte.astype(jnp.bfloat16)), cumulative_scores, token_index)
+                raise ValueError("Didn't implement this; nah.")
             elif self.config.averaging_method == "residual":
-                logits = jnp.einsum("blh,vh->blv", self.residual_average(x, cumulative_scores, token_index), wte.astype(jnp.bfloat16))
+                logits = jnp.einsum("blh,vh->blv", self.residual_average(idx.shape[-1], x, cumulative_scores, token_index), wte.astype(jnp.bfloat16))
             elif self.config.averaging_method == "rightmost":
                 # Take only rightmost token of each original token
-                rolled = jnp.roll(token_index, -1, axis=-1)
-                is_rightmost = rolled != token_index
-                rightmost_x = x[is_rightmost].reshape(b, t, -1)
-                logits = self.lm_head(rightmost_x)
+                try:
+                    rolled = jnp.roll(token_index, -1, axis=-1)
+                    is_rightmost = rolled != token_index
+                    rightmost_x = x[is_rightmost].reshape(b, t, -1)
+                    logits = jnp.einsum("blh,vh->blv", rightmost_x, wte.astype(jnp.bfloat16))
+                except:
+                    raise ValueError(f"averaging_method: {self.config.averaging_method} can't be jitted in the way we have implemented it since rightmost shape is not guaranteed; you shouldn't be using it anyway except for debugging; for details see error above.")
             else:
                 raise ValueError(f"Invalid averaging_method: {self.config.averaging_method}")
 
@@ -485,23 +487,25 @@ class Thoughtbubbles(nn.Module):
 
         return logits, loss
 
-    def residual_average(self, residuals, cumulative_scores, token_index):
+    def residual_average(self, input_size, residuals, cumulative_scores, token_index):
         """Average residuals weighted by cumulative scores"""
+
+        # residuals = jax.random.normal(jax.random.PRNGKey(8), (8,128,512))
+        # cumulative_scores = jnp.zeros((8,128))
+        # token_index = jnp.arange(64).repeat(2)[None].repeat(8, axis=0)
+
         scaled_residuals = residuals * jnp.exp(cumulative_scores)[:, :, None]
+        # jax.debug.print(str(scaled_residuals.shape))
 
         # Scatter-add to original token positions
         summed_residuals = jnp.zeros(
-            (residuals.shape[0], self.config.block_size, self.config.n_embd),
+            (residuals.shape[0], input_size, self.config.n_embd),
             dtype=residuals.dtype
         )
+        B, T = token_index.shape
+        b = jnp.arange(B)[:, None] # (b, 1)
 
-        # Manual scatter-add implementation
-        for b in range(residuals.shape[0]):
-            for i in range(residuals.shape[1]):
-                idx = token_index[b, i]
-                summed_residuals = summed_residuals.at[b, idx].add(scaled_residuals[b, i])
-
-        return summed_residuals
+        return summed_residuals.at[b, token_index].add(scaled_residuals)
 
     def configure_optimizers_adamw(self, weight_decay, learning_rate, betas, device_type):
         """Returns Optax optimizer for AdamW"""
