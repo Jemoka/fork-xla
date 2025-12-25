@@ -10,8 +10,9 @@ sudo apt-get install gcsfuse
 cd ~
 mkdir data
 mkdir checkpoints
-gcsfuse --implicit-dirs --file-mode=777 --dir-mode=777 thoughtbubbles_data ./data
-gcsfuse --implicit-dirs --file-mode=777 --dir-mode=777 thoughtbubbles_checkpoints_ue1 ./checkpoints
+#gcsfuse --implicit-dirs --file-mode=777 --dir-mode=777 thoughtbubbles_data ./data
+sudo mount /dev/sdb ./data
+gcsfuse --implicit-dirs --file-mode=777 --dir-mode=777 thoughtbubbles_checkpoints_uc2 ./checkpoints
 
 # repo
 curl -LsSf https://astral.sh/uv/install.sh | sh
