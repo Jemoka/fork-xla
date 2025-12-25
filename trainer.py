@@ -582,17 +582,18 @@ class Trainer:
             np.save(os.path.join(path, "rng.npy"), rng_state)
             logger.debug("CHECKPOINT | saved random state")
 
-            # Save checkpoint 
-            state = jax.device_get(self.state)
-            logger.debug("CHECKPOINT | gathered training state")
-            checkpointer = ocp.PyTreeCheckpointer()
-            checkpointer.save(
-                os.path.join(path, "checkpoint"),
-                {'state': state},
-                force=True
-            )
+        # Save checkpoint 
+        logger.debug("CHECKPOINT | gathered training state")
+        checkpointer = ocp.PyTreeCheckpointer()
+        checkpointer.save(
+            os.path.join(path, "checkpoint"),
+            {'state': self.state},
+            force=True
+        )
 
-            logger.debug("CHECKPOINT | saved training state")
+        logger.debug("CHECKPOINT | saved training state")
+
+        if self.main_process():
             # Save config
             with open(os.path.join(path, "config.json"), "w") as df:
                 json.dump(
