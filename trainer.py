@@ -553,9 +553,9 @@ class Trainer:
         self.key = jax_random.PRNGKey(rng_state["jax_random"])
 
         # Load checkpoint using Orbax
-        checkpointer = ocp.PyTreeCheckpointer()
-        restored = checkpointer.restore(os.path.join(path, "checkpoint"), target={'state': self.state})
-        self.state = self.state.replace(**restored["state"])
+        checkpointer = ocp.StandardCheckpointer()
+        restored = checkpointer.restore(os.path.join(path, "checkpoint"), target=self.state)
+        self.state = self.state.replace(**restored)
 
         # Load config
         with open(os.path.join(path, "config.json"), "r") as df:
@@ -588,10 +588,10 @@ class Trainer:
             logger.debug("CHECKPOINT | saved random state")
 
         # Save checkpoint
-        checkpointer = ocp.PyTreeCheckpointer()
+        checkpointer = ocp.StandardCheckpointer()
         checkpointer.save(
             os.path.join(temp_path, "checkpoint"),
-            {'state': jax.device_get(self.state)},
+            jax.device_get(self.state),
             force=True
         )
         logger.debug("CHECKPOINT | saved training state")
