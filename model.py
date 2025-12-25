@@ -518,7 +518,6 @@ class Thoughtbubbles(nn.Module):
                         weight_decay=weight_decay)
         )
 
-        logger.info(f"OPTIMIZER | using AdamW")
         return optimizer
 
     def configure_optimizers_muon(self, distributed=False):

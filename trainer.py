@@ -163,6 +163,8 @@ class Trainer:
                 betas=(args.beta1, args.beta2),
                 device_type="gpu" if jax.devices()[0].platform == "gpu" else "tpu",
             )
+            if self.main_process():
+                logger.info(f"OPTIMIZER | using AdamW")
         else:
             raise RuntimeError("Sadly I haven't ported muon yet mmmmm...")
 
@@ -583,7 +585,6 @@ class Trainer:
             logger.debug("CHECKPOINT | saved random state")
 
         # Save checkpoint 
-        logger.debug("CHECKPOINT | gathered training state")
         checkpointer = ocp.PyTreeCheckpointer()
         checkpointer.save(
             os.path.join(path, "checkpoint"),
