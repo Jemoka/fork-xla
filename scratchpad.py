@@ -85,6 +85,61 @@ args = configure(
     # shard_into=4,
     validation_steps=1024
 )
+
+# from types import SimpleNamespace
+# args.block_size = 64
+# args.n_embd = 512
+# self = SimpleNamespace(config=args)
+# args.plan=["regular", "regular", "fork", "regular", "regular", "fork", "regular", "regular"]
+
+# # args.averaging_method = "rightmost"
+
+# model = Thoughtbubbles(args)
+# variables = model.init(
+#     jax.random.PRNGKey(8),
+#     jnp.ones((3, 3)).astype(jnp.int16)
+# )
+
+# # model.apply(variables, jnp.ones((1,3)).astype(jnp.int16), deterministic=True)[0].argmax(axis=-1)
+
+# # import jax
+
+# @jax.jit
+# def test(values):
+#     a,b = model.apply(values, jnp.ones((8,3)).astype(jnp.int16), deterministic=True)
+#     return a.sum()
+
+# jax.value_and_grad(test)(variables)
+# test()
+
+# # logits, loss = 
+# test(jnp.ones((1,3)).astype(jnp.int16))
+# test(.astype(jnp.int16))
+# test(jnp.ones((3,3)).astype(jnp.int16))
+# # loss
+
+
+# def f_single(x1):  # x1: (T,)
+#     logits, _ = model.apply(variables, x1[None, :], deterministic=True)
+#     return logits[0]
+
+# def f_batch(xB):   # xB: (B,T)
+#     logits, _ = model.apply(variables, xB, deterministic=True)
+#     return logits
+
+# xB = jnp.ones((3, 3), jnp.int16)
+
+# y_v = jax.vmap(f_single)(xB).astype(jnp.float32)
+# y_b = f_batch(xB).astype(jnp.float32)
+
+# print("maxabs all:", jnp.max(jnp.abs(y_v - y_b)))
+# print("maxabs row0:", jnp.max(jnp.abs(y_v[0] - y_b[0])))
+
+# rel = jnp.max(jnp.abs(y_v - y_b)) / (jnp.max(jnp.abs(y_v)) + 1e-12)
+# print(rel)
+
+
+
 # !ls
 # !pushd ./output && pwd -P && popd
 # !rm -rf output
