@@ -525,7 +525,7 @@ class Trainer:
                     % self.args.validation_interval
                     == 0
             ):
-                score, val_metrics = valid_step()
+                score, val_metrics = valid_step(self.state)
                 if self.main_process():
                     wandb.log(
                         val_metrics,
