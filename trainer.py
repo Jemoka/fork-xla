@@ -38,6 +38,8 @@ from loguru import logger
 from model import *
 from utils import plot_logger, parse_dataset_spec
 
+from jax.experimental import multihost_utils
+
 R = Random(7)
 
 class Trainer:
@@ -560,41 +562,53 @@ class Trainer:
         self.best_val_score_ = data.get("score", 0)
 
     def save(self, path):
-        # Only save on main process
-        if not self.main_process():
-            return
-
         logger.debug("CHECKPOINT | saving checkpoint at {}", path)
 
-        os.makedirs(path, exist_ok=True)
+        multihost_utils.sync_global_devices("pre_save")
 
-        # Save random state
-        rng_state = {
-            "python_random": random.getstate(),
-            "numpy_random": np.random.get_state(),
-            "jax_random": int(self.key[0]),  # Save seed
-        }
-        np.save(os.path.join(path, "rng.npy"), rng_state)
+        logger.debug("CHECKPOINT | ready to save")
 
-        # Save checkpoint 
-        checkpointer = ocp.PyTreeCheckpointer()
-        checkpointer.save(
-            os.path.join(path, "checkpoint"),
-            {'state': jax.device_get(self.state)},
-            force=True
-        )
+        if self.main_process():
 
-        # Save config
-        with open(os.path.join(path, "config.json"), "w") as df:
-            json.dump(
-                {
-                    "config": vars(self.args),
-                    "steps": self.global_step_counter_,
-                    "score": self.best_val_score_,
-                    "wandb": wandb.run.id if self.args.wandb else None,
-                },
-                df,
+            os.makedirs(path, exist_ok=True)
+            logger.debug("CHECKPOINT | created checkpoint directory")
+
+            # Save random state
+            rng_state = {
+                "python_random": random.getstate(),
+                "numpy_random": np.random.get_state(),
+                "jax_random": int(self.key[0]),  # Save seed
+            }
+            np.save(os.path.join(path, "rng.npy"), rng_state)
+            logger.debug("CHECKPOINT | saved random state")
+
+            # Save checkpoint 
+            state = jax.device_get(self.state)
+            logger.debug("CHECKPOINT | gathered training state")
+            checkpointer = ocp.PyTreeCheckpointer()
+            checkpointer.save(
+                os.path.join(path, "checkpoint"),
+                {'state': state},
+                force=True
             )
+
+            logger.debug("CHECKPOINT | saved training state")
+            # Save config
+            with open(os.path.join(path, "config.json"), "w") as df:
+                json.dump(
+                    {
+                        "config": vars(self.args),
+                        "steps": self.global_step_counter_,
+                        "score": self.best_val_score_,
+                        "wandb": wandb.run.id if self.args.wandb else None,
+                    },
+                    df,
+                )
+            logger.debug("CHECKPOINT | saved config")
+
+        logger.debug("CHECKPOINT | blocking until save is over")
+        multihost_utils.sync_global_devices("post_save")
+        logger.debug("CHECKPOINT | finished save, moving on...")
 
     @classmethod
     def from_pretrained(cls, path, disable_wandb=True, distributed=False):
