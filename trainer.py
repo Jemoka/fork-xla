@@ -554,7 +554,7 @@ class Trainer:
 
         # Load checkpoint using Orbax
         checkpointer = ocp.StandardCheckpointer()
-        restored = checkpointer.restore(os.path.join(path, "checkpoint"), target=self.state)
+        restored = checkpointer.restore(os.path.join(path, "checkpoint"), target=jax.device_get(self.state))
         self.state = jax.device_put(restored, self.state_sharding)
 
         # Load config
