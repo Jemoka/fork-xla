@@ -41,7 +41,7 @@ class AsyncStrategy:
 
         self.strategy = strategy
         self.args = kwargs
-        self.queue = Queue()
+        self.queue = Queue(maxsize=16384)
         self.stop_flag = False
         self.error = None
 
