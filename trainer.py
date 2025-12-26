@@ -271,23 +271,24 @@ class Trainer:
             self.save(self.recovery_dir)
         if self.main_process():
             logger.info("Beginning training...")
-        self.epoch()
-
-        # except Exception as e:
-        #     if self.main_process():
-        #         logger.info(f"TRAIN | FAILURE | building recovery checkpoint for {e}")
-        #     try:
-        #         # move recovery checkpoint to self.recovery_dir+"_last_good"
-        #         shutil.rmtree(self.recovery_dir.removesuffix("/")+"_last_good", ignore_errors=True)
-        #         shutil.move(self.recovery_dir, self.recovery_dir.removesuffix("/")+"_last_good")
-        #         self.save(self.recovery_dir)
-        #         if self.main_process():
-        #             logger.error(f"TRAIN | FAILURE | Encountered exception {str(e)}; safely checkpointed, so we're blowing up now...")
-        #     except Exception as es:
-        #         if self.main_process():
-        #             logger.error(f"TRAIN | FAILURE | Encountered exception {str(e)}; CHECKPOINT FAILED with '{str(es)}', but eh, so we're blowing up anyways...")
-        #         raise e
-        #     raise e
+        try:
+            self.epoch()
+        except Exception as e:
+            if self.main_process():
+                logger.info(f"TRAIN | FAILURE | building recovery checkpoint for {e}")
+            try:
+                # move recovery checkpoint to self.recovery_dir+"_last_good"
+                if self.main_process():
+                    shutil.rmtree(self.recovery_dir.removesuffix("/")+"_last_good", ignore_errors=True)
+                    shutil.move(self.recovery_dir, self.recovery_dir.removesuffix("/")+"_last_good")
+                self.save(self.recovery_dir)
+                if self.main_process():
+                    logger.error(f"TRAIN | FAILURE | Encountered exception {str(e)}; safely checkpointed, so we're blowing up now...")
+            except Exception as es:
+                if self.main_process():
+                    logger.error(f"TRAIN | FAILURE | Encountered exception {str(e)}; CHECKPOINT FAILED with '{str(es)}', but eh, so we're blowing up anyways...")
+                raise e
+            raise e
         self.finish()
 
     def finish(self):
