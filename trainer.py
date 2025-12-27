@@ -618,6 +618,7 @@ class Trainer:
         if self.main_process():
             shutil.rmtree(path, ignore_errors=True)
             shutil.copytree(temp_path, path, dirs_exist_ok=True, ignore_dangling_symlinks=True)
+            shutil.rmtree(temp_path, ignore_errors=True)
             logger.debug("CHECKPOINT | moved to {}", path)
 
     @classmethod
