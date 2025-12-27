@@ -428,9 +428,9 @@ class Trainer:
 
         # because sometimes the load function may skip some epochs
         for indx in range(
-            self.global_step_counter_*self.accumulate_steps,
-            self.total_batches + 1,
-            self.accumulate_steps
+                self.global_step_counter_,
+                self.total_batches + 1,
+                self.accumulate_steps
         ):
             logger.debug("DATA | {} | START", indx)
             x,y = self.batch()
