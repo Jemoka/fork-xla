@@ -393,30 +393,34 @@ class Trainer:
                 x_i, y_i = xb  # (B_local, T)
 
                 _, loss_i = state.apply_fn({'params': state.params}, x_i, y_i, deterministic=True)
-                # IMPORTANT: make sure loss_i is a SCALAR that is an average over (B_local, T)
-                # If your model returns per-token/per-example, adjust accordingly.
-
-                # If loss_i is mean over tokens in this microbatch:
-                n = x_i.shape[0] * x_i.shape[1]  # B_local * T
+                n = x_i.shape[0] * x_i.shape[1]
                 return (loss_sum + loss_i * n, count + n), None
 
             (loss_sum, count), _ = jax.lax.scan(reduce, (0.0, 0), (x, y))
 
-            # all-reduce across the DP mesh axis
-            loss_sum = jax.lax.psum(loss_sum, axis_name="batch")
-            count    = jax.lax.psum(count, axis_name="batch")
-
-            return loss_sum / count
+            return loss_sum, count
 
         valid_step_inner_jit = jax.jit(
             valid_step_inner,
             in_shardings=(self.state_sharding, self.data_sharding),
-            out_shardings=None,
+            out_shardings=(None, None),
         )
 
 
         def valid_step_wrapper(state):
-            loss = float(valid_step_inner_jit(state, (x,y)))
+            loss_sum, count = valid_step_inner_jit(state, (x, y))
+            loss_sum = jax.device_get(loss_sum)
+            count    = jax.device_get(count)
+
+            # if these come back as per-device arrays, reduce them here
+            loss_sum_local = float(jnp.sum(loss_sum))
+            count_local    = float(jnp.sum(count))
+
+            loss_sum_g = multihost_utils.process_allgather(jnp.asarray(loss_sum_local))
+            count_g    = multihost_utils.process_allgather(jnp.asarray(count_local))
+
+            loss = float(jnp.sum(loss_sum_g) / jnp.sum(count_g))
+
             score = 1/loss
             metrics = {"val/loss": loss, "val/score": score}
 
