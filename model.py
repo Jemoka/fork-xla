@@ -150,7 +150,7 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Dense(
             self.n_embd,
             use_bias=self.config.bias,
-            kernel_init=nn.with_partitioning(self.xavier, ('n_embd', 'n_embd_out')),
+            kernel_init=nn.with_partitioning(self.xavier, ('n_embd_out', 'n_embd')),
             param_dtype=jnp.float32,
             dtype=jnp.bfloat16
         )
@@ -533,7 +533,7 @@ class Thoughtbubbles(nn.Module):
 # map logical axes to device axes
 SHARDING_PLAN = (
     ('n_embd', None), 
-    ('n_embd_out', None), 
+    ('n_embd_out', 'shard'), 
     ('n_embd_ff', 'shard'), # for an upproj, we shard along input axis
     ('n_attn', 'shard'),
     ('n_fork', None),

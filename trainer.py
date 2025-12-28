@@ -77,7 +77,10 @@ class Trainer:
         devices = devices.reshape(-1, args.shard_into)
 
         self.mesh = Mesh(devices, axis_names=("batch", "shard")) # sharded data parallel
-        self.replicas = devices.shape[0]
+        self.replicas = jax.device_count() // args.shard_into
+        self.local_replicas = local // args.shard_into
+        assert self.replicas == self.mesh.shape["batch"]
+        assert self.local_replicas * jax.process_count() == self.replicas
 
         # compute how much to accumulate
         self.per_device_batch_size, self.accumulate_steps = self.find_accumulation_steps(
@@ -92,8 +95,10 @@ class Trainer:
         # print statistics
         if self.main_process():
             logger.info(
-                "BATCHING | {} batchsize/node * {} dp * {} accumulation = {} batchsize",
+                "BATCHING | {} batchsize/node * ({} local * {} prox = {} dp) * {} accumulation = {} batchsize",
                 self.per_device_batch_size,
+                self.local_replicas,
+                jax.process_count(),
                 self.replicas,
                 self.accumulate_steps,
                 args.batch_size,
@@ -302,7 +307,7 @@ class Trainer:
             if not strategy:
                 self.async_dl_cache["train"] = self.data_strategy.get_async_batches(
                     self.per_device_batch_size *
-                    self.replicas *
+                    self.local_replicas *
                     self.accumulate_steps,
                     slice
                 )
@@ -313,8 +318,8 @@ class Trainer:
             # we will load a number of samples divisble by per_device_batch_size
             # so that we can reshape it so + enable batched loads
             x, y = self.data_strategy.get_batch(
-                (self.args.validation_steps//(self.per_device_batch_size*self.replicas))*
-                (self.per_device_batch_size*self.replicas),
+                (self.args.validation_steps//(self.per_device_batch_size*self.local_replicas))*
+                (self.per_device_batch_size*self.local_replicas),
                 slice,
                 deterministic_key=deterministic_key,
             )
@@ -371,33 +376,37 @@ class Trainer:
         x,y = self.batch("val", deterministic_key=32)
 
         # reshape into (steps, per_device_bs*replicas, seq_len) and shard the middle axis
-        x = x.reshape(-1, self.per_device_batch_size*self.replicas, x.shape[-1])
-        y = y.reshape(-1, self.per_device_batch_size*self.replicas, y.shape[-1])
+        x = x.reshape(-1, self.per_device_batch_size*self.local_replicas, x.shape[-1])
+        y = y.reshape(-1, self.per_device_batch_size*self.local_replicas, y.shape[-1])
         x,y = jax.device_put(
             (x,y),
             self.data_sharding
         )
 
         # because batch is fixed we should be jitting the inner function
+
         def valid_step_inner(state, batch):
+            x, y = batch  # x: (S, B_local, T)
 
-            def reduce(loss, batch):
-                """loss -> batch -> (loss_acc, None)"""
+            def reduce(carry, xb):
+                loss_sum, count = carry
+                x_i, y_i = xb  # (B_local, T)
 
-                x,y = batch
+                _, loss_i = state.apply_fn({'params': state.params}, x_i, y_i, deterministic=True)
+                # IMPORTANT: make sure loss_i is a SCALAR that is an average over (B_local, T)
+                # If your model returns per-token/per-example, adjust accordingly.
 
-                _, loss_partial = state.apply_fn(
-                    {'params': state.params},
-                    x, y,
-                    deterministic=False
-                )
+                # If loss_i is mean over tokens in this microbatch:
+                n = x_i.shape[0] * x_i.shape[1]  # B_local * T
+                return (loss_sum + loss_i * n, count + n), None
 
-                return (loss+loss_partial*x.shape[0]), None
+            (loss_sum, count), _ = jax.lax.scan(reduce, (0.0, 0), (x, y))
 
-            loss, _ = jax.lax.scan(reduce, 0.0, batch)
-            loss = loss/(batch[0].shape[0]*batch[0].shape[1]) # average over number of steps
+            # all-reduce across the DP mesh axis
+            loss_sum = jax.lax.psum(loss_sum, axis_name="batch")
+            count    = jax.lax.psum(count, axis_name="batch")
 
-            return loss
+            return loss_sum / count
 
         valid_step_inner_jit = jax.jit(
             valid_step_inner,
@@ -438,12 +447,12 @@ class Trainer:
             x,y = self.batch()
             x = x.reshape(
                 -1,
-                self.replicas*self.per_device_batch_size,
+                self.local_replicas*self.per_device_batch_size,
                 self.args.block_size
             )
             y = y.reshape(
                 -1,
-                self.replicas*self.per_device_batch_size,
+                self.local_replicas*self.per_device_batch_size,
                 self.args.block_size
             )
             logger.debug("DATA | {} | PLACING", indx)
@@ -522,7 +531,6 @@ class Trainer:
 
             # perform validation and save a checkpoint, if needed
             if (
-                    indx != 0 and
                     indx % self.accumulate_steps == 0 and
                     (indx // self.accumulate_steps)
                     % self.args.validation_interval
