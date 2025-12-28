@@ -71,7 +71,9 @@ class Trainer:
         self.per_device_batch_size = args.per_device_batch_size
 
         # Compute replication mesh setup
-        devices = np.array(jax.devices())
+        devs = sorted(jax.devices(), key=lambda d: (d.process_index, d.id))
+        local = jax.local_device_count()
+        devices = np.array(devs).reshape(-1, local)
         devices = devices.reshape(-1, args.shard_into)
 
         self.mesh = Mesh(devices, axis_names=("batch", "shard")) # sharded data parallel

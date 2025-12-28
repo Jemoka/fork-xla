@@ -532,10 +532,10 @@ class Thoughtbubbles(nn.Module):
 
 # map logical axes to device axes
 SHARDING_PLAN = (
-    ('n_embd', 'shard'), 
+    ('n_embd', None), 
     ('n_embd_out', None), 
-    ('n_embd_ff', None), # for an upproj, we shard along input axis
-    ('n_attn', None),
+    ('n_embd_ff', 'shard'), # for an upproj, we shard along input axis
+    ('n_attn', 'shard'),
     ('n_fork', None),
     ('vocab', None),
 )
