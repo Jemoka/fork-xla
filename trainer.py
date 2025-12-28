@@ -535,6 +535,7 @@ class Trainer:
 
             # perform validation and save a checkpoint, if needed
             if (
+                    indx != 0 and
                     indx % self.accumulate_steps == 0 and
                     (indx // self.accumulate_steps)
                     % self.args.validation_interval
