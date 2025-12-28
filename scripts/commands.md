@@ -29,7 +29,7 @@ nohup uv run main.py final_pretrain_1_9b_baseline \
   --out_dir /home/houjun/checkpoints \
   --validation_interval 2048 \
   --checkpoint_interval 40960 \
-  --per_device_batch_size 32 \
+  --per_device_batch_size 128 \
   --validation_steps 2048 \
   --shard_into 4 \
   --report_interval 32 \
