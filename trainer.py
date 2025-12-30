@@ -539,7 +539,7 @@ class Trainer:
                     indx % self.accumulate_steps == 0 and
                     (indx // self.accumulate_steps)
                     % self.args.validation_interval
-                    == 0
+                    == (self.args.validation_interval//3) # so we don't ovelap with checkpoint
             ):
                 score, val_metrics = valid_step(self.state)
                 if self.main_process():
