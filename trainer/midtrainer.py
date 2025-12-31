@@ -638,6 +638,7 @@ class Midtrainer:
         logger.debug("RESET | Bookeeping...")
         # Reset global step counter
         self.global_step_counter_ = 0
+        self.best_val_score_ = float("-inf")  # "score" means higher is better
 
         # Store new schedule and optimizer for reference
         self.schedule = new_schedule

@@ -9,6 +9,7 @@ parser.add_argument("--wandb", default=False, action="store_true", help="whether
 parser.add_argument("--distributed", default=False, action="store_true", help="this is a GPU slice")
 parser.add_argument("--estimate_mfu", default=False, action="store_true", help="log flops and mfu")
 parser.add_argument("--warm_start", default=None, type=str, help="recover trainer from this path")
+parser.add_argument("--midtrain", default=None, type=str, help="midtrain starting from this pretrained checkpoint")
 parser.add_argument("--local-rank", "--local_rank", default=0, type=int, help="the local rank of this run")
 parser.add_argument("--flops_promised", default=989e12, type=float, help="how many flops does our hardware promise (for MFU measurements); default to H100")
 
