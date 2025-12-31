@@ -392,7 +392,6 @@ class ForkingBlock(nn.Module):
                 new_cumulative_scores,
                 float("-inf")
             )
-            jax.debug.breakpoint()
 
         return x_to_consider, new_cumulative_scores, new_token_indices
 
