@@ -61,6 +61,7 @@ srun --export=ALL bash -lc '
       --lr 2.5e-4 \
       --warmup_pct 0 \
       --decay_pct 1.0 \
+      --shard_into 1 \
       --wandb
   "
 '
