@@ -340,7 +340,6 @@ class Pretrainer:
                     logits, loss = state.apply_fn(
                         {'params': params},
                         x, y,
-                        padding_mask=padding_mask,
                         deterministic=False,
                         rngs={'dropout': dropout_key}
                     )
@@ -395,7 +394,7 @@ class Pretrainer:
                 loss_sum, count = carry
                 x_i, y_i, mask_i = xb  # (B_local, T)
 
-                _, loss_i = state.apply_fn({'params': state.params}, x_i, y_i, padding_mask=mask_i, deterministic=True)
+                _, loss_i = state.apply_fn({'params': state.params}, x_i, y_i, deterministic=True)
                 n = x_i.shape[0] * x_i.shape[1]
                 return (loss_sum + loss_i * n, count + n), None
 
