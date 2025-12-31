@@ -118,10 +118,17 @@ def causal_bias(max_block_size):
     return jnp.where(m, jnp.array(0, ATTN_DTYPE), neg)[None, None, :, :]
 
 @jax.jit
-def key_padding_bias(padding_mask):
+def casual_pad_bias(padding_mask):  # padding_mask: (B,T) True=real
+    T = padding_mask.shape[1]
+    causal = jnp.tril(jnp.ones((T,T), dtype=jnp.bool_))[None, None, :, :]   # (1,1,T,T)
+
+    k_keep = padding_mask[:, None, None, :]  # (B,1,1,T)
+    q_keep = padding_mask[:, None, :, None]  # (B,1,T,1)
+
+    allowed = causal & k_keep & q_keep        # (B,1,T,T)
+
     neg = jnp.array(-jnp.inf, ATTN_DTYPE)
-    keep = padding_mask.astype(jnp.bool_)[:, None, None, :]  # (B,1,1,T)
-    return jnp.where(keep, jnp.array(0, ATTN_DTYPE), neg)
+    return jnp.where(allowed, jnp.array(0, ATTN_DTYPE), neg)
 
 class CausalSelfAttention(nn.Module):
     config: any
@@ -187,11 +194,11 @@ class CausalSelfAttention(nn.Module):
             q = q.at[:, :, :, -1].set(jnp.ones_like(q[:, :, :, -1]))
             k = k.at[:, :, :, -1].set(jnp.repeat(cumulative_scores[:, None, :], k.shape[1], axis=1))
 
-        mask = causal_bias(self.config.max_block_size)
-        mask = mask[:,:,:q.shape[-2],:k.shape[-2]]
-        
         if padding_mask is not None:
-            mask = mask + key_padding_bias(padding_mask)
+            mask = casual_pad_bias(padding_mask)
+        else:
+            mask = causal_bias(self.config.max_block_size)
+        mask = mask[:,:,:q.shape[-2],:k.shape[-2]]
 
         # Attenuate v values with cumulative scores
         v = jnp.einsum("bnlh,bl->bnlh", v, jnp.exp(cumulative_scores))
@@ -204,6 +211,8 @@ class CausalSelfAttention(nn.Module):
             value=v.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
             bias=mask
         )
+        if padding_mask is not None:
+            y = y * padding_mask[:, :, None, None].astype(y.dtype)
 
         if not deterministic:
             y = nn.Dropout(rate=self.dropout_rate)(y, deterministic=False)
