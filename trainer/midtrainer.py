@@ -536,7 +536,7 @@ class Midtrainer:
                     indx % self.accumulate_steps == 0 and
                     (indx // self.accumulate_steps)
                     % self.args.checkpoint_interval
-                    == (self.args.checkpoint_interval) # offset checkpoint to not crash with val
+                    == 0 # offset checkpoint to not crash with val
             ):
                 self.save(str(self.save_dir / str(indx // self.accumulate_steps)))
 
@@ -546,7 +546,7 @@ class Midtrainer:
                     indx % self.accumulate_steps == 0 and
                     (indx // self.accumulate_steps)
                     % self.args.validation_interval
-                    == (self.args.validation_interval) # so we don't ovelap with checkpoint
+                    == 0 # so we don't ovelap with checkpoint
             ):
                 score, val_metrics = valid_step(self.state)
                 if self.main_process():
