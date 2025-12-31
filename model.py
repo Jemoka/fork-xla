@@ -159,6 +159,17 @@ class CausalSelfAttention(nn.Module):
     def __call__(self, x, cumulative_scores, token_index, padding_mask=None, deterministic=False):
         # sometimes peolpe do float32 attn, idk
 
+        # from types import SimpleNamespace
+        # self = SimpleNamespace()
+        # x,y,p = trainer.batch()
+        # padding_mask = p[:8, :256]
+
+        # qkv = jax.random.normal(jax.random.PRNGKey(8), (8,512,512*3))
+        # cumulative_scores = jnp.zeros((8,512))
+        # token_index = jnp.arange(256).repeat(2)[None].repeat(8, axis=0)
+        # self.n_head = 16
+        # self.config = args
+
         B, T, C = x.shape
 
         # QKV projection
@@ -188,9 +199,11 @@ class CausalSelfAttention(nn.Module):
             k = k.at[:, :, :, -1].set(jnp.repeat(cumulative_scores[:, None, :], k.shape[1], axis=1))
 
         if padding_mask is not None:
+            padding_bias = key_padding_bias(padding_mask)
+            padding_bias = jnp.take_along_axis(padding_bias, token_index[:, None, None, :], axis=-1)
             mask = (
                 causal_bias(self.config.max_block_size)[:,:,:q.shape[-2],:k.shape[-2]]+
-                key_padding_bias(padding_mask)
+                padding_bias
             )
         else:
             mask = causal_bias(self.config.max_block_size)[:,:,:q.shape[-2],:k.shape[-2]]
