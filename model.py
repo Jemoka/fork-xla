@@ -118,17 +118,10 @@ def causal_bias(max_block_size):
     return jnp.where(m, jnp.array(0, ATTN_DTYPE), neg)[None, None, :, :]
 
 @jax.jit
-def casual_pad_bias(padding_mask):  # padding_mask: (B,T) True=real
-    T = padding_mask.shape[1]
-    causal = jnp.tril(jnp.ones((T,T), dtype=jnp.bool_))[None, None, :, :]   # (1,1,T,T)
-
-    k_keep = padding_mask[:, None, None, :]  # (B,1,1,T)
-    q_keep = padding_mask[:, None, :, None]  # (B,1,T,1)
-
-    allowed = causal & k_keep & q_keep        # (B,1,T,T)
-
+def key_padding_bias(padding_mask):
     neg = jnp.array(-jnp.inf, ATTN_DTYPE)
-    return jnp.where(allowed, jnp.array(0, ATTN_DTYPE), neg)
+    keep = padding_mask.astype(jnp.bool_)[:, None, None, :]  # (B,1,1,T)
+    return jnp.where(keep, jnp.array(0, ATTN_DTYPE), neg)
 
 class CausalSelfAttention(nn.Module):
     config: any
@@ -195,22 +188,33 @@ class CausalSelfAttention(nn.Module):
             k = k.at[:, :, :, -1].set(jnp.repeat(cumulative_scores[:, None, :], k.shape[1], axis=1))
 
         if padding_mask is not None:
-            mask = casual_pad_bias(padding_mask)
+            mask = (
+                causal_bias(self.config.max_block_size)[:,:,:q.shape[-2],:k.shape[-2]]+
+                key_padding_bias(padding_mask)
+            )
         else:
-            mask = causal_bias(self.config.max_block_size)
-        mask = mask[:,:,:q.shape[-2],:k.shape[-2]]
+            mask = causal_bias(self.config.max_block_size)[:,:,:q.shape[-2],:k.shape[-2]]
 
         # Attenuate v values with cumulative scores
         v = jnp.einsum("bnlh,bl->bnlh", v, jnp.exp(cumulative_scores))
 
         # Use JAX's optimized attention
         # expects (batch x seq x heads x hidden), so we permute back from (b, nH, T, hs)
-        y = jax.nn.dot_product_attention(
-            query=q.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
-            key=k.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
-            value=v.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
-            bias=mask
-        )
+        if padding_mask is not None:
+            y = jax.nn.dot_product_attention(
+                query=q.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
+                key=k.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
+                value=v.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
+                mask=(mask==0)
+            )
+        else:
+            y = jax.nn.dot_product_attention(
+                query=q.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
+                key=k.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
+                value=v.transpose(0, 2, 1, 3).astype(ATTN_DTYPE),
+                bias=mask
+            )
+
         if padding_mask is not None:
             y = y * padding_mask[:, :, None, None].astype(y.dtype)
 
@@ -503,7 +507,7 @@ class Thoughtbubbles(nn.Module):
     def residual_average(self, input_size, residuals, cumulative_scores, token_index):
         """Average residuals weighted by cumulative scores"""
 
-        # residuals = jax.random.normal(jax.random.PRNGKey(8), (8,128,512))
+        # qkv = jax.random.normal(jax.random.PRNGKey(8), (8,128,512*3))
         # cumulative_scores = jnp.zeros((8,128))
         # token_index = jnp.arange(64).repeat(2)[None].repeat(8, axis=0)
 
