@@ -42,7 +42,7 @@ from jax.experimental import multihost_utils
 
 R = Random(7)
 
-class Trainer:
+class Pretrainer:
     def device_count(self):
         return jax.device_count()
 
@@ -313,18 +313,18 @@ class Trainer:
                 )
                 strategy = self.async_dl_cache["train"]
 
-            x,y = strategy.get_batch()
+            x, y, padding_mask = strategy.get_batch()
         else:
             # we will load a number of samples divisble by per_device_batch_size
             # so that we can reshape it so + enable batched loads
-            x, y = self.data_strategy.get_batch(
+            x, y, padding_mask = self.data_strategy.get_batch(
                 (self.args.validation_steps//(self.per_device_batch_size*self.local_replicas))*
                 (self.per_device_batch_size*self.local_replicas),
                 slice,
                 deterministic_key=deterministic_key,
             )
 
-        return x, y
+        return x, y, padding_mask
 
 
     def make_train_step(self):
@@ -333,12 +333,13 @@ class Trainer:
 
             def train_eval(state, batch, dropout_key, accumulate_steps):
                 """batch -> gradient"""
-                x, y = batch
+                x, y, padding_mask = batch
 
                 def loss_fn(params):
                     logits, loss = state.apply_fn(
                         {'params': params},
                         x, y,
+                        padding_mask=padding_mask,
                         deterministic=False,
                         rngs={'dropout': dropout_key}
                     )
@@ -373,30 +374,31 @@ class Trainer:
         )
 
     def make_valid_step(self):
-        x,y = self.batch("val", deterministic_key=32)
+        x, y, padding_mask = self.batch("val", deterministic_key=32)
 
         # reshape into (steps, per_device_bs*replicas, seq_len) and shard the middle axis
         x = x.reshape(-1, self.per_device_batch_size*self.local_replicas, x.shape[-1])
         y = y.reshape(-1, self.per_device_batch_size*self.local_replicas, y.shape[-1])
-        x,y = jax.device_put(
-            (x,y),
+        padding_mask = padding_mask.reshape(-1, self.per_device_batch_size*self.local_replicas, padding_mask.shape[-1])
+        x, y, padding_mask = jax.device_put(
+            (x, y, padding_mask),
             self.data_sharding
         )
 
         # because batch is fixed we should be jitting the inner function
 
         def valid_step_inner(state, batch):
-            x, y = batch  # x: (S, B_local, T)
+            x, y, padding_mask = batch  # x: (S, B_local, T)
 
             def reduce(carry, xb):
                 loss_sum, count = carry
-                x_i, y_i = xb  # (B_local, T)
+                x_i, y_i, mask_i = xb  # (B_local, T)
 
-                _, loss_i = state.apply_fn({'params': state.params}, x_i, y_i, deterministic=True)
+                _, loss_i = state.apply_fn({'params': state.params}, x_i, y_i, padding_mask=mask_i, deterministic=True)
                 n = x_i.shape[0] * x_i.shape[1]
                 return (loss_sum + loss_i * n, count + n), None
 
-            (loss_sum, count), _ = jax.lax.scan(reduce, (0.0, 0), (x, y))
+            (loss_sum, count), _ = jax.lax.scan(reduce, (0.0, 0), (x, y, padding_mask))
 
             return loss_sum, count
 
@@ -408,7 +410,7 @@ class Trainer:
 
 
         def valid_step_wrapper(state):
-            loss_sum, count = valid_step_inner_jit(state, (x, y))
+            loss_sum, count = valid_step_inner_jit(state, (x, y, padding_mask))
             loss_sum = jax.device_get(loss_sum)
             count    = jax.device_get(count)
 
@@ -448,7 +450,7 @@ class Trainer:
                 self.accumulate_steps
         ):
             logger.debug("DATA | {} | START", indx)
-            x,y = self.batch()
+            x, y, padding_mask = self.batch()
             x = x.reshape(
                 -1,
                 self.local_replicas*self.per_device_batch_size,
@@ -459,10 +461,15 @@ class Trainer:
                 self.local_replicas*self.per_device_batch_size,
                 self.args.block_size
             )
+            padding_mask = padding_mask.reshape(
+                -1,
+                self.local_replicas*self.per_device_batch_size,
+                self.args.block_size
+            )
             logger.debug("DATA | {} | PLACING", indx)
 
             batch = jax.device_put(
-                (x,y),
+                (x, y, padding_mask),
                 self.data_sharding
 
             )

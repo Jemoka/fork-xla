@@ -2,6 +2,7 @@
 # GSM8K-Aug contains grade school math problems with step-by-step solutions
 
 import os
+import json
 from tqdm import tqdm
 import numpy as np
 import tiktoken
@@ -56,6 +57,9 @@ def prepare_gsm8k_aug(output_path, block_size, pad_token):
         num_proc=num_proc,
     )
 
+    # Track shapes for shape.json
+    shapes = {}
+
     # Write each split to binary files with fixed block size
     for split, dset in tokenized.items():
         num_samples = len(dset)
@@ -107,6 +111,9 @@ def prepare_gsm8k_aug(output_path, block_size, pad_token):
         tokens_arr.flush()
         mask_arr.flush()
 
+        # Track shape
+        shapes[split] = [num_samples, block_size]
+
         # Print statistics
         avg_length = total_length / num_samples
         print(f"\n{split.upper()} STATISTICS:")
@@ -116,6 +123,11 @@ def prepare_gsm8k_aug(output_path, block_size, pad_token):
         print(f"  Padded: {num_padded} ({100*num_padded/num_samples:.2f}%)")
         print(f"  Exact fit: {num_samples - num_truncated - num_padded}")
         print(f"  Sequence lengths - Min: {min_length}, Max: {max_length}, Avg: {avg_length:.2f}")
+
+    # Write shape.json
+    with open(os.path.join(output_path, "shape.json"), "w") as f:
+        json.dump(shapes, f, indent=4)
+    print(f"\nWrote shape.json: {shapes}")
 
     # Example usage:
     # tokens = np.memmap('train.bin', dtype=np.uint16, mode='r').reshape(-1, block_size)

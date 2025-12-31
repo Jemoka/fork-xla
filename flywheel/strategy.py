@@ -20,6 +20,14 @@ class Dataset(ABC):
 
     @abstractmethod
     def get_batch(self, batch_size, split="train", deterministic_key=None):
+        """Get a batch of data.
+
+        Returns:
+            Tuple of (x, y, padding_mask) where:
+                x: input tokens
+                y: target tokens
+                padding_mask: bool array, True for real tokens, False for padding
+        """
         pass
 
 
@@ -55,7 +63,7 @@ class AsyncStrategy:
         """Get the next batch. Blocks until a batch is available.
 
         Returns:
-            Tuple of numpy arrays (x, y)
+            Tuple of numpy arrays (x, y, padding_mask)
 
         Raises:
             Exception if the worker thread encountered an error
@@ -133,19 +141,21 @@ class Strategy:
             # Fallback (should not reach here if rates sum to 1)
             batch = self.mixture[-1].dataset.get_batch(batch_size, split, deterministic_key)
 
-        x, y = batch
+        x, y, padding_mask = batch
 
         # validate batch, if any rows have zeros then resample
         cut_batch_x = x[(~(x == 0).all(axis=-1))]
         cut_batch_y = y[(~(x == 0).all(axis=-1))]
+        cut_batch_mask = padding_mask[(~(x == 0).all(axis=-1))]
         if cut_batch_x.shape[0] < batch_size:
-            x_addn, y_addn = self.get_batch(
+            x_addn, y_addn, mask_addn = self.get_batch(
                 batch_size - cut_batch_x.shape[0], split,
                 deterministic_key+1 if deterministic_key is not None else None
             )
             x = np.concatenate([cut_batch_x, x_addn], axis=0)
             y = np.concatenate([cut_batch_y, y_addn], axis=0)
+            padding_mask = np.concatenate([cut_batch_mask, mask_addn], axis=0)
 
-        return (x, y)
+        return (x, y, padding_mask)
 
 

@@ -1,0 +1,30 @@
+# calculations assumes training at 2B (2000000000) tokens
+# straight decay to 10% FT LR
+
+[[dataset]]
+type = "memmap"
+path = "/sphinx/u/houjun/dataset/pes2o_large"
+weight = 0.125 # 250M used/42B tokens
+has_val = false
+
+[[dataset]]
+type = "memmap"
+path = "/sphinx/u/houjun/dataset/fineweb"
+weight = 0.125 # 250M used/250B+ tokens
+
+[[dataset]]
+type = "padded"
+path = "/sphinx/u/houjun/dataset/gsm8k_aug"
+weight = 0.4 # 4.06 epochs: 0.8B used/197M total
+
+[[dataset]]
+type = "padded"
+path = "/sphinx/u/houjun/dataset/mmlu"
+weight = 0.05 # 2.08 epochs: 100M used/48M total
+
+[[dataset]]
+type = "padded"
+path = "/sphinx/u/houjun/dataset/smoltalk"
+weight = 0.3 # 1.12 epochs: 600M used/534M total
+
+

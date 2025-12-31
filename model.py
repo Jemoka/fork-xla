@@ -476,7 +476,7 @@ class Thoughtbubbles(nn.Module):
             logits_flat = logits_f32.reshape(-1, logits_f32.shape[-1])
             targets_flat = targets.reshape(-1)
 
-            # Mask out ignore index (-1)
+            # Mask out ignore index (-1) AND padding tokens
             mask = targets_flat != -1
             logits_masked = logits_flat
             targets_masked = jnp.where(mask, targets_flat, 0)

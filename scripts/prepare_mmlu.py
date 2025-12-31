@@ -2,6 +2,7 @@
 # MMLU contains multi-task language understanding questions across various subjects
 
 import os
+import json
 from tqdm import tqdm
 import numpy as np
 import tiktoken
@@ -61,6 +62,9 @@ def prepare_mmlu(output_path, block_size, pad_token, val_pct):
         num_proc=num_proc,
     )
 
+    # Track shapes for shape.json
+    shapes = {}
+
     # Write each split to binary files with fixed block size
     for split, dset in tokenized.items():
         num_samples = len(dset)
@@ -112,6 +116,9 @@ def prepare_mmlu(output_path, block_size, pad_token, val_pct):
         tokens_arr.flush()
         mask_arr.flush()
 
+        # Track shape
+        shapes[split] = [num_samples, block_size]
+
         # Print statistics
         avg_length = total_length / num_samples
         print(f"\n{split.upper()} STATISTICS:")
@@ -121,6 +128,11 @@ def prepare_mmlu(output_path, block_size, pad_token, val_pct):
         print(f"  Padded: {num_padded} ({100*num_padded/num_samples:.2f}%)")
         print(f"  Exact fit: {num_samples - num_truncated - num_padded}")
         print(f"  Sequence lengths - Min: {min_length}, Max: {max_length}, Avg: {avg_length:.2f}")
+
+    # Write shape.json
+    with open(os.path.join(output_path, "shape.json"), "w") as f:
+        json.dump(shapes, f, indent=4)
+    print(f"\nWrote shape.json: {shapes}")
 
     # Example usage:
     # tokens = np.memmap('train.bin', dtype=np.uint16, mode='r').reshape(-1, block_size)

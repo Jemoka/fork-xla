@@ -1,6 +1,6 @@
 from loguru import logger
 
-from trainer import Trainer
+from trainer import Pretrainer
 from parameters import parser
 
 from pathlib import Path
@@ -8,16 +8,15 @@ from pathlib import Path
 import signal
 
 
-@logger.catch
-def execute(args):
+def pretrain(args):
     if args.warm_start and (Path(str(args.warm_start))/"config.json").exists():
         # by default, the from_pretrained function disables
         # whatever wandb settings was there b/c we usually
         # use this to load an existing model, but when we are
         # actually training, we want to actually enable it
-        trainer = Trainer.from_pretrained(args.warm_start, disable_wandb=False, distributed=args.distributed)
+        trainer = Pretrainer.from_pretrained(args.warm_start, disable_wandb=False, distributed=args.distributed)
     else:
-        trainer = Trainer(args, distributed=args.distributed)
+        trainer = Pretrainer(args, distributed=args.distributed)
 
     # hook a signal to checkponit on preemption
     def checkpoint_on_preemption(signum, frame):
@@ -34,6 +33,10 @@ def execute(args):
 
     # and train
     trainer.train()
+
+@logger.catch
+def execute(args):
+    pretrain(args)
 
 def configure(experiment, **kwargs):
     """configure a run from arguments
