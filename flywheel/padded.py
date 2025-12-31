@@ -35,11 +35,12 @@ from flywheel.strategy import Dataset
 
 class PaddedDataset(Dataset):
 
-    def __init__(self, args, path, has_val=True):
+    def __init__(self, args, path, has_val=True, padding_idx=0):
         self.cache_train = None
         self.cache_val = None
         self.cache_train_mask = None
         self.cache_val_mask = None
+        self.padding = padding_idx
 
         with open(Path(path) / "shape.json", "r") as f:
             self.shape = json.load(f)
@@ -107,18 +108,35 @@ class PaddedDataset(Dataset):
         y = data[ix][:,1:].astype(np.int64)
         padding = mask[ix][:,:-1].astype(np.bool)
 
-        # left-crop to the nearest multiple of 16
-        crop_len = (x.shape[1] // 16) * 16
-        x = x[:,-crop_len:]
-        y = y[:,-crop_len:]
-        padding = padding[:,-crop_len:]
-
         # Convert to numpy arrays
         x = np.array(x)
         y = np.array(y)
         padding_mask = np.array(padding)
 
         # set padding tokens to -1
-        y[~(mask[ix][:,1:])[:,-crop_len:]] = -1
+        y[~(mask[ix][:,1:])] = -1
+
+        # add a row of padding up to batch size
+        x = np.concatenate(
+            (np.zeros(x.shape[0])[:, None]
+             .repeat(block_size-x.shape[-1], axis=-1)
+             .astype(np.int64),
+             x),
+            axis=-1
+        )
+        y = np.concatenate(
+            (np.full(y.shape[0], -1)[:, None]
+             .repeat(block_size-y.shape[-1], axis=-1)
+             .astype(np.int64),
+             y),
+            axis=-1
+        )
+        padding_mask = np.concatenate(
+            (np.full(padding_mask.shape[0], False)[:, None]
+             .repeat(block_size-padding_mask.shape[-1], axis=-1)
+             .astype(np.bool),
+             padding_mask),
+            axis=-1
+        )
 
         return x, y, padding_mask

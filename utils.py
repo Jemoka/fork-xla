@@ -450,7 +450,11 @@ def parse_dataset_spec(path_to_spec: str, args):
     # init_function takes (args, config_dict) and returns dataset instance
     DATASET_TYPES = {
         'memmap': lambda args, cfg: MemmapDataset(args, cfg['path'], has_val=cfg.get("has_val", False)),
-        'padded': lambda args, cfg: PaddedDataset(args, cfg['path'], has_val=cfg.get("has_val", False)),
+        'padded': lambda args, cfg: PaddedDataset(
+            args, cfg['path'],
+            has_val=cfg.get("has_val", False),
+            padding_idx=cfg.get("padding_idx", 0)
+        ),
         # Add new dataset types here:
         # 'huggingface': lambda args, cfg: HFDataset(args, cfg['name'], cfg.get('split', 'train')),
         # 'custom': lambda args, cfg: CustomDataset(args, **{k: v for k, v in cfg.items() if k not in ['type', 'weight']}),
