@@ -122,7 +122,7 @@ class Midtrainer:
         # initialize wandb
         if self.main_process():
             wandb.init(
-                project="fork-xla",
+                project="fork-xla-mid",
                 config=vars(args),
                 mode=None if args.wandb else "disabled",
                 name=args.experiment,
