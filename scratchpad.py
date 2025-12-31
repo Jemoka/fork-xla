@@ -18,7 +18,7 @@ logger.add(
     filter=lambda x: x["extra"].get("task", "") != "plot",
 )
 
-from trainer import Midtrainer
+from trainer import Pretrainer
 from commands import configure
 import os
 import json
@@ -29,13 +29,13 @@ from argparse import Namespace
 args = configure(
     "test",
     flops_promised=275e12,
-    report_interval=2,
+    report_interval=1,
     validation_interval=10,
-    data_file="/juice2/scr2/houjun/fork-xla/experiments/data/midtrain.toml",
+    data_file="/juice2/scr2/houjun/fork-xla/experiments/data/pretrain.toml",
     total_steps=8500,
     per_device_batch_size=32, #for h200s
     shard_into=1, # h100
-    # plan=["regular", "regular", "regular", "regular"],
+    plan=["regular", "regular", "fork", "regular", "regular", "regular", "fork", "regular", "regular"],
 #     # per_device_batch_size=20, for a100s
 #     per_device_batch_size=32, # for tpu-v4
 #     # batch_size=64, # so we don't insanely accumulate
@@ -43,7 +43,15 @@ args = configure(
 #     validation_steps=1024
 )
 
-# !git fetch && git checkout 31d18d0529e87e1547addd561ea388283047308a
+# !git fetch && git checkout a198ce933867b686644b56103ecdfc59daca1c43
+# f812346b1fb05c7704e64b38bc8ce4893dfe45c6
+# 3263cec199374c73bed21ff7dd670a066ae1477b
+
+# 1f73ce74cd3c29958c85fcdfd758e0fa577af029
+
+# feec32b5d35c67261af7da168b25c8a051d969ed
+# b540e313c012a5b9251f903424abc0584ef2c26a
+# 31d18d0529e87e1547addd561ea388283047308a
 # d6a7b71b34f5b468fb147676e63e60688d4be140
 # 1ac1b0df8b1224a74fb942892f2448d1c3a16ea3
 # 60191eedf68f4fa60fecb6195a7eda8b6058554b
@@ -53,13 +61,27 @@ args = configure(
 # ecb2fb01ee4cd15aa2f081985e6ff83310089f37
 
 # da77456784a9dcbfdf1ce40676317e6eb3c37a06
-path = "/sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_baseline/checkpoint/184320"
+# path = "/sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_baseline/checkpoint/184320"
 
-trainer = Midtrainer.from_pretrained(path, args)
+trainer = Pretrainer(args)
 trainer.train()
-# x,y,p = self.batch()
+
+x.shape
 # padding_mask = p[:8,-128:]
 # padding_mask
+
+from types import SimpleNamespace
+self = SimpleNamespace()
+x,y,p = trainer.batch()
+padding_mask = p[:8, :256]
+
+qkv = jax.random.normal(jax.random.PRNGKey(8), (8,512,512*3))
+cumulative_scores = jnp.zeros((8,512))
+token_index = jnp.arange(256).repeat(2)[None].repeat(8, axis=0)
+self.n_head = 16
+self.config = args
+
+token_index.shape
 
 # # x.shape
 # # y.shape
