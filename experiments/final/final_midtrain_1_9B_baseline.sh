@@ -45,7 +45,7 @@ srun --export=ALL bash -lc '
       final_midtrain_1_9b_baseline \
       --warm_start /sphinx/u/houjun/checkpoints/fork/final_midtrain_1_9b_baseline/recovery \
       --midtrain /sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_baseline/checkpoint/184320 \
-      --data_file /juice2/scr2/houjun/fork/experiments/data/midtrain.toml \
+      --data_file /juice2/scr2/houjun/fork-xla/experiments/data/midtrain.toml \
       --plan $(printf "regular %.0s" {1..36}) \
       --flops_promised 989e12 \
       --block_size 512 \
@@ -58,6 +58,7 @@ srun --export=ALL bash -lc '
       --checkpoint_interval 2048 \
       --validation_steps 64 \
       --report_interval 8 \
+      --total_steps 8500 \
       --lr 2.5e-4 \
       --warmup_pct 0 \
       --decay_pct 1.0 \
