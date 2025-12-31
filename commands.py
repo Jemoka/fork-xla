@@ -43,7 +43,7 @@ def midtrain(args, midtrain):
         # actually training, we want to actually enable it
         trainer = Midtrainer.from_checkpoint(args.warm_start, disable_wandb=False, distributed=args.distributed)
     else:
-        trainer = Midtrainer.from_pretrained(midtrain, args, distributed=args.distributed)
+        trainer = Midtrainer.from_pretrained(midtrain, args, distributed=args.distributed, disable_wandb=False)
 
     # hook a signal to checkponit on preemption
     def checkpoint_on_preemption(signum, frame):
