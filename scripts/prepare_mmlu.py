@@ -1,5 +1,5 @@
-# saves the GSM8K-Aug dataset to a binary file for training
-# GSM8K-Aug contains grade school math problems with step-by-step solutions
+# saves the MMLU dataset to a binary file for training
+# MMLU contains multi-task language understanding questions across various subjects
 
 import os
 from tqdm import tqdm
@@ -23,24 +23,29 @@ enc = tiktoken.get_encoding("gpt2")
 @click.argument("output_path", type=click.Path(exists=True))
 @click.option("--block_size", default=512, help="Block size for padding/truncation")
 @click.option("--pad_token", default=0, help="Token ID to use for padding")
-def prepare_gsm8k_aug(output_path, block_size, pad_token):
+@click.option("--val_pct", default=0.05, help="Percentage of data to use for validation")
+def prepare_mmlu(output_path, block_size, pad_token, val_pct):
     """
-    Encoding GSM8K-Aug with the GPT2 encoding and mmaping the output to OUTPUT_PATH.
+    Encoding MMLU with the GPT2 encoding and mmaping the output to OUTPUT_PATH.
     Creates two files per split: {split}.bin (tokens) and {split}.bin.mask (padding mask).
     """
 
-    # Load GSM8K-Aug dataset from HuggingFace
-    # Contains train split with augmented math problems
-    dataset = load_dataset("whynlp/gsm8k-aug", num_proc=num_proc_load_dataset)
+    # Load MMLU dataset from HuggingFace
+    # Using auxiliary_train split which contains training data
+    dataset = load_dataset("cais/mmlu", "auxiliary_train", num_proc=num_proc_load_dataset)["train"]
+
+    # Create train/val split
+    split_dataset = dataset.train_test_split(test_size=val_pct, seed=2357, shuffle=True)
+    split_dataset['val'] = split_dataset.pop('test')  # rename the test split to val
 
     # Define the encoding function
     def process(example):
-        # Format: question + steps (cleaned) + answer
+        # Format: question + choices + answer
+        example = example["train"]
         text = (
             example["question"] + "\n" +
-            " ".join([step.replace("<<", "").replace(">>", "") for step in example["steps"]]) + "\n" +
-            "answer: " +
-            example["answer"]
+            "choices: " + ", ".join(example["choices"]) + "\n" +
+            "answer: " + example["choices"][example["answer"]]
         )
 
         ids = enc.encode_ordinary(text)  # encode_ordinary ignores any special tokens
@@ -49,9 +54,9 @@ def prepare_gsm8k_aug(output_path, block_size, pad_token):
         return out
 
     # Tokenize the dataset
-    tokenized = dataset.map(
+    tokenized = split_dataset.map(
         process,
-        remove_columns=['question', 'steps', 'answer'],
+        remove_columns=['train'],
         desc="tokenizing the splits",
         num_proc=num_proc,
     )
@@ -122,4 +127,4 @@ def prepare_gsm8k_aug(output_path, block_size, pad_token):
     # mask = np.memmap('train.bin.mask', dtype=np.bool_, mode='r').reshape(-1, block_size)
 
 if __name__ == '__main__':
-    prepare_gsm8k_aug()
+    prepare_mmlu()
