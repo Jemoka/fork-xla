@@ -229,6 +229,7 @@ class CausalSelfAttention(nn.Module):
             )
 
         if padding_mask is not None:
+            padding_mask = jnp.take_along_axis(padding_mask, token_index, axis=-1)
             y = y * padding_mask[:, :, None, None].astype(y.dtype)
 
         if not deterministic:
@@ -327,7 +328,7 @@ class ForkingBlock(nn.Module):
         return jnp.clip(logsigmoid, a_min=min_val)
 
     @nn.compact
-    def fork(self, x, cumulative_scores, token_index):
+    def fork(self, x, cumulative_scores, token_index, padding_mask):
         """Top-k forking implementation"""
 
         batch_size = cumulative_scores.shape[0] # (batch_size, k)
@@ -383,12 +384,22 @@ class ForkingBlock(nn.Module):
         new_cumulative_scores = jnp.take_along_axis(forking_scores_cum, top_k_indices, axis=-1)
         new_token_indices = jnp.take_along_axis(token_index, orig_indices, axis=-1)
 
+        # mask out padding
+        if padding_mask is not None:
+            padding_mask = jnp.take_along_axis(padding_mask, new_token_indices, axis=-1)
+            new_cumulative_scores = jnp.where(
+                padding_mask,
+                new_cumulative_scores,
+                float("-inf")
+            )
+            jax.debug.breakpoint()
+
         return x_to_consider, new_cumulative_scores, new_token_indices
 
     def __call__(self, x, cumulative_scores, token_index, padding_mask=None,
                  layer_num=None, deterministic=False):
         # Fork first
-        x, cumulative_scores, token_index = self.fork(x, cumulative_scores, token_index)
+        x, cumulative_scores, token_index = self.fork(x, cumulative_scores, token_index, padding_mask)
 
         # Then normal block forward
         exponentiated_scores = jnp.exp(cumulative_scores)
