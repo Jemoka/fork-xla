@@ -392,6 +392,10 @@ class Thoughtbubbles(nn.Module):
 
     @nn.compact
     def __call__(self, idx, targets=None, padding_mask=None, deterministic=False):
+        """
+        padding_mask should be True at (b,j) for batch `b` and token `j` if (b,j) is *KEPT*
+        i.e. True = not padding
+        """
         device = idx.device if hasattr(idx, 'device') else None
         b, t = idx.shape
         assert t <= self.config.block_size, (
