@@ -57,7 +57,7 @@ srun --export=ALL bash -lc '
       --validation_interval 256 \
       --checkpoint_interval 2048 \
       --validation_steps 64 \
-      --report_interval 8 \
+      --report_interval 1 \
       --total_steps 8500 \
       --lr 2.5e-4 \
       --warmup_pct 0 \
