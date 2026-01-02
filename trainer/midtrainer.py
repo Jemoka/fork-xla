@@ -214,7 +214,8 @@ class Midtrainer:
         # define sharding spces for data and parameters
         # (accumulate, batch, seq_len)
         # replicate accumulate steps, shard along "batch" mesh axes, replicate seq length
-        self.data_sharding = NamedSharding(self.mesh, P(None, "batch", None))
+        self.data_pspec = P(None, "batch", None)
+        self.data_sharding = NamedSharding(self.mesh, self.data_pspec)
         self.state_sharding = flax.linen.logical_to_mesh_sharding(
             flax.linen.get_partition_spec(self.state), self.mesh, rules=SHARDING_PLAN
         )
@@ -380,9 +381,15 @@ class Midtrainer:
         x = x.reshape(-1, self.per_device_batch_size*self.local_replicas, x.shape[-1])
         y = y.reshape(-1, self.per_device_batch_size*self.local_replicas, y.shape[-1])
         padding_mask = padding_mask.reshape(-1, self.per_device_batch_size*self.local_replicas, padding_mask.shape[-1])
-        x, y, padding_mask = jax.device_put(
-            (x, y, padding_mask),
-            self.data_sharding
+
+        x = multihost_utils.host_local_array_to_global_array(
+            x, self.mesh, self.data_pspec
+        )
+        y = multihost_utils.host_local_array_to_global_array(
+            y, self.mesh, self.data_pspec
+        )
+        padding_mask = multihost_utils.host_local_array_to_global_array(
+            padding_mask, self.mesh, self.data_pspec
         )
 
         # because batch is fixed we should be jitting the inner function
@@ -468,14 +475,19 @@ class Midtrainer:
             )
             logger.debug("DATA | {} | PLACING", indx)
 
-            batch = jax.device_put(
-                (x, y, padding_mask),
-                self.data_sharding
-
+            x = multihost_utils.host_local_array_to_global_array(
+                x, self.mesh, self.data_pspec
             )
+            y = multihost_utils.host_local_array_to_global_array(
+                y, self.mesh, self.data_pspec
+            )
+            padding_mask = multihost_utils.host_local_array_to_global_array(
+                padding_mask, self.mesh, self.data_pspec
+            )
+
             logger.debug("DATA | {} | PLACED", indx)
 
-            self.state, loss = train_step(self.state, batch, self.dropout_key, self.accumulate_steps)
+            self.state, loss = train_step(self.state, (x,y,padding_mask), self.dropout_key, self.accumulate_steps)
             logger.debug("COMPUTATION | {} | FINISHED", indx)
             train_metrics = {}
 
