@@ -549,6 +549,10 @@ class Pretrainer:
                     == (self.args.validation_interval//3) # so we don't ovelap with checkpoint
             ):
                 score, val_metrics = valid_step(self.state)
+                val_metrics["train/tokens"] = (
+                    (((indx+1) // self.accumulate_steps)*
+                     self.args.batch_size*self.args.block_size)
+                )
                 if self.main_process():
                     wandb.log(
                         val_metrics,
