@@ -79,7 +79,7 @@ class Pretrainer:
         self.mesh = Mesh(devices, axis_names=("batch", "shard")) # sharded data parallel
 
         if self.main_process():
-            logger.info("DEVICES | devices: {} mesh: {}", devices.shape, self.mesh)
+            logger.info("DEVICES | topology: {}, mesh: {}, count: {}", devices.shape, self.mesh, jax.device_count())
 
         self.replicas = jax.device_count() // args.shard_into
         self.local_replicas = local // args.shard_into
