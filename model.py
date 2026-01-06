@@ -132,7 +132,6 @@ class CausalSelfAttention(nn.Module):
         self.n_head = self.config.n_head
         self.n_embd = self.config.n_embd
         self.dropout_rate = self.config.dropout
-        self.xavier = jax.nn.initializers.xavier_normal()
 
         # Initialize RoPE
         self.rope = RotaryPosEncoding(self.config.n_embd // self.config.n_head, seq_dim=-2)
@@ -141,7 +140,7 @@ class CausalSelfAttention(nn.Module):
         self.c_attn = nn.Dense(
             3 * self.n_embd,
             use_bias=self.config.bias,
-            kernel_init=nn.with_partitioning(self.xavier, ('n_embd', 'n_attn')),
+            kernel_init=nn.with_partitioning(jax.nn.initializers.normal(stddev=0.02), ('n_embd', 'n_attn')),
             param_dtype=jnp.float32,
             dtype=jnp.bfloat16
         )
@@ -150,7 +149,10 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Dense(
             self.n_embd,
             use_bias=self.config.bias,
-            kernel_init=nn.with_partitioning(self.xavier, ('n_embd_out', 'n_embd')),
+            kernel_init=nn.with_partitioning(
+                jax.nn.initializers.normal(stddev=0.02/math.sqrt(2 * len(self.config.plan))),
+                ('n_embd_out', 'n_embd')
+            ),
             param_dtype=jnp.float32,
             dtype=jnp.bfloat16
         )
@@ -250,12 +252,14 @@ class MLP(nn.Module):
     config: any
 
     def setup(self):
-        self.xavier = jax.nn.initializers.xavier_normal()
 
         self.c_fc = nn.Dense(
             4 * self.config.n_embd,
             use_bias=self.config.bias,
-            kernel_init=nn.with_partitioning(self.xavier, ('n_embd', 'n_embd_ff')),
+            kernel_init=nn.with_partitioning(
+                jax.nn.initializers.normal(stddev=0.02),
+                ('n_embd', 'n_embd_ff')
+            ),
             param_dtype=jnp.float32,
             dtype=jnp.bfloat16
         )
@@ -263,7 +267,10 @@ class MLP(nn.Module):
         self.c_proj = nn.Dense(
             self.config.n_embd,
             use_bias=self.config.bias,
-            kernel_init=nn.with_partitioning(self.xavier, ('n_embd_ff', 'n_embd')),
+            kernel_init=nn.with_partitioning(
+                jax.nn.initializers.normal(stddev=0.02/math.sqrt(2 * len(self.config.plan))),
+                ('n_embd_ff', 'n_embd')
+            ),
             param_dtype=jnp.float32,
             dtype=jnp.bfloat16
         )
@@ -300,16 +307,11 @@ class Block(nn.Module):
         return x, cumulative_scores, token_index
 
 
-class ForkingBlock(nn.Module):
+class ForkingBlock(Block):
     config: any
 
     def setup(self):
-        self.xavier = jax.nn.initializers.xavier_normal()
-
-        self.ln_1 = LayerNorm(self.config.n_embd, bias=self.config.bias)
-        self.attn = CausalSelfAttention(self.config)
-        self.ln_2 = LayerNorm(self.config.n_embd, bias=self.config.bias)
-        self.mlp = MLP(self.config)
+        super().setup()
 
         self.forking_ln = LayerNorm(self.config.n_embd, bias=self.config.bias)
 
@@ -317,7 +319,10 @@ class ForkingBlock(nn.Module):
         self.forking_score = nn.Dense(
             2,
             use_bias=False,
-            kernel_init=nn.with_partitioning(self.xavier, ('n_embd', 'n_fork')),
+            kernel_init=nn.with_partitioning(
+                jax.nn.initializers.normal(stddev=0.02),
+                ('n_embd', 'n_fork')
+            ),
             param_dtype=jnp.float32,
             dtype=jnp.bfloat16
         )
@@ -400,15 +405,15 @@ class ForkingBlock(nn.Module):
         # Fork first
         x, cumulative_scores, token_index = self.fork(x, cumulative_scores, token_index, padding_mask)
 
-        # Then normal block forward
-        exponentiated_scores = jnp.exp(cumulative_scores)
-        x = x + jnp.einsum("bl,blh->blh", exponentiated_scores,
-                           self.attn(self.ln_1(x), cumulative_scores, token_index,
-                                     padding_mask=padding_mask, deterministic=deterministic))
-        x = x + jnp.einsum("bl,blh->blh", exponentiated_scores,
-                           self.mlp(self.ln_2(x), deterministic=deterministic))
-
-        return x, cumulative_scores, token_index
+        return super().__call__(
+            x,
+            cumulative_scores,
+            token_index,
+            padding_mask=padding_mask,
+            layer_num=layer_num,
+            deterministic=deterministic
+        )
+        
 
 class Thoughtbubbles(nn.Module):
     config: any
@@ -481,25 +486,26 @@ class Thoughtbubbles(nn.Module):
         # x_norm = (x - mean) / jnp.sqrt(var + 1e-5)
 
         # jax.debug.print("{} {}", x[0].astype(jnp.float32).sum(), x.dtype)
-        x = self.ln_f(x)
         # jax.debug.print("{} {}", x[0].mean(), x.dtype)
 
         # Compute logits based on sequence length and averaging method
         if x.shape[1] == idx.shape[-1]:
-            logits = jnp.einsum("blh,vh->blv", x, wte.astype(jnp.bfloat16))
+            logits = jnp.einsum("blh,vh->blv", self.ln_f(x), wte.astype(jnp.bfloat16))
         else:
             # Apply the selected averaging method
             if self.config.averaging_method == "logit":
                 raise ValueError("Didn't implement this; nah.")
             elif self.config.averaging_method == "residual":
-                logits = jnp.einsum("blh,vh->blv", self.residual_average(idx.shape[-1], x, cumulative_scores, token_index), wte.astype(jnp.bfloat16))
+                logits = jnp.einsum("blh,vh->blv", self.ln_f(
+                    self.residual_average(idx.shape[-1], x, cumulative_scores, token_index)
+                ), wte.astype(jnp.bfloat16))
             elif self.config.averaging_method == "rightmost":
                 # Take only rightmost token of each original token
                 try:
                     rolled = jnp.roll(token_index, -1, axis=-1)
                     is_rightmost = rolled != token_index
                     rightmost_x = x[is_rightmost].reshape(b, t, -1)
-                    logits = jnp.einsum("blh,vh->blv", rightmost_x, wte.astype(jnp.bfloat16))
+                    logits = jnp.einsum("blh,vh->blv", self.ln_f(rightmost_x), wte.astype(jnp.bfloat16))
                 except:
                     raise ValueError(f"averaging_method: {self.config.averaging_method} can't be jitted in the way we have implemented it since rightmost shape is not guaranteed; you shouldn't be using it anyway except for debugging; for details see error above.")
             else:
