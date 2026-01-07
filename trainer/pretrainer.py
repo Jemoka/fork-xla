@@ -165,19 +165,6 @@ class Pretrainer:
         variables = self.model.init(init_key, dummy_input, deterministic=True)
         params = variables['params']
 
-        # Create optimizer
-        if self.args.optimizer == "adamw":
-            self.tx = self.model.configure_optimizers_adamw(
-                weight_decay=args.weight_decay,
-                learning_rate=args.lr,
-                betas=(args.beta1, args.beta2),
-                device_type="gpu" if jax.devices()[0].platform == "gpu" else "tpu",
-            )
-            if self.main_process():
-                logger.info(f"OPTIMIZER | using AdamW")
-        else:
-            raise RuntimeError("Sadly I haven't ported muon yet mmmmm...")
-
         # Create learning rate schedule (WSD: Warmup-Stable-Decay)
         warmup_steps = int((self.total_batches // self.accumulate_steps) * self.args.warmup_pct)
         decay_steps = int((self.total_batches // self.accumulate_steps) * self.args.decay_pct)
@@ -200,12 +187,18 @@ class Pretrainer:
             boundaries=[warmup_steps, warmup_steps + stable_steps]
         )
 
-        # Update optimizer with schedule
-        self.tx = optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.scale_by_schedule(lambda count: self.schedule(count)),
-            self.tx
-        )
+        # Create optimizer
+        if self.args.optimizer == "adamw":
+            self.tx = self.model.configure_optimizers_adamw(
+                weight_decay=args.weight_decay,
+                learning_rate=self.schedule,
+                betas=(args.beta1, args.beta2),
+                device_type="gpu" if jax.devices()[0].platform == "gpu" else "tpu",
+            )
+            if self.main_process():
+                logger.info(f"OPTIMIZER | using AdamW")
+        else:
+            raise RuntimeError("Sadly I haven't ported muon yet mmmmm...")
 
         # Create training state
         self.state = train_state.TrainState.create(
@@ -362,7 +355,7 @@ class Pretrainer:
                 grad_acc = jax.tree_util.tree_map(lambda a, g: a + g, grad, grad_single)
                 loss_acc = loss + loss_single
 
-                return (grad_acc, loss_acc), None
+-               return (grad_acc, loss_acc), None
 
             grad_zero = jax.tree_util.tree_map(jnp.zeros_like, state.params)
             (grad_sum, loss_sum), _ = jax.lax.scan(reduce, (grad_zero, 0.0), batch)
