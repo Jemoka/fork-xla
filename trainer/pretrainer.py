@@ -355,7 +355,7 @@ class Pretrainer:
                 grad_acc = jax.tree_util.tree_map(lambda a, g: a + g, grad, grad_single)
                 loss_acc = loss + loss_single
 
--               return (grad_acc, loss_acc), None
+                return (grad_acc, loss_acc), None
 
             grad_zero = jax.tree_util.tree_map(jnp.zeros_like, state.params)
             (grad_sum, loss_sum), _ = jax.lax.scan(reduce, (grad_zero, 0.0), batch)
