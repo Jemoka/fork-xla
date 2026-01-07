@@ -57,5 +57,5 @@ parser.add_argument("--merge_killed_tokens", default=False, action="store_true",
 parser.add_argument("--averaging_method", type=str, choices=["residual", "logit", "rightmost"], default="residual", help="method for averaging forked tokens")
 
 # sharding configuration
-parser.add_argument("--shard_into", help="shard each large tensor into this many shards; number of chips must be divisible", type=int, default=4)
+parser.add_argument("--shard_into", help="shard each large tensor into this many shards; number of chips must be divisible", type=int, default=1)
 

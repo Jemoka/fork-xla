@@ -437,13 +437,23 @@ class Finetuner:
     def _autoregress(state, input, input_mask, num_tokens):
         seq = jnp.arange(num_tokens)
 
+        inp_buf = jnp.zeros((len(input), num_tokens))
+        mask_buf = jnp.zeros((len(input), num_tokens))
+
+        inp_buf = inp_buf.at[:, :input.shape[1]].set(input)
+        mask_buf = mask_buf.at[:, :input_mask.shape[1]].set(input_mask)
+        inp_buf, mask_buf = inp_buf.astype(jnp.int32), mask_buf.astype(jnp.bool_)
+
         def reduce(carry, xb):
             inputs, masks = carry
             outputs, loss_i = state.apply_fn({'params': state.params}, inputs, padding_mask=masks, deterministic=True)
+            offset = xb + input.shape[1]
 
-            new_inputs = jnp.concat([inputs, outputs.argmax(axis=-1)], axis=1)
-            new_masks = jnp.concat([masks, jnp.ones((masks.shape[0], 1), dtype=masks.dtype)], axis=1)
-
+            next_token = jnp.argmax(outputs[:, -1, :], axis=-1)
+            next_mask = jnp.ones_like(next_token, dtype=jnp.bool_)
+            new_inputs = inputs.at[:, offset].set(next_token)
+            new_masks = masks.at[:, offset].set(next_mask)
+            
             return (new_inputs, new_masks), None
 
         (final_inputs, final_masks), _ = jax.lax.scan(reduce, (input, input_mask), seq)
