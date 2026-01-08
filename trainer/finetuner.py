@@ -450,12 +450,12 @@ class Finetuner:
 
             outputs, loss_i = state.apply_fn(
                 {'params': state.params},
-                inputs[:, :offset],
-                padding_mask=masks[:, :offset],
+                inputs,
+                padding_mask=masks,
                 deterministic=True
             )
 
-            next_token = jnp.argmax(outputs[:, -1, :], axis=-1)
+            next_token = jnp.argmax(outputs[:, offset-1, :], axis=-1)
             next_mask = jnp.ones_like(next_token, dtype=jnp.bool_)
             new_inputs = inputs.at[:, offset].set(next_token)
             new_masks = masks.at[:, offset].set(next_mask)
