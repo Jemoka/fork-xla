@@ -646,12 +646,23 @@ class Pretrainer:
 
         multihost_utils.sync_global_devices("save:mid")
 
-        # Save checkpoint - Orbax handles multi-host coordination automatically
-        # All hosts participate in saving their shards to shared filesystem
+        # Save checkpoint - convert host-local arrays to global arrays for multi-host
+        # This handles replicated scalars like 'step' that have SingleDeviceSharding
         checkpointer = ocp.StandardCheckpointer()
+
+        # Convert any host-local arrays to globally replicated arrays
+        def make_global_array(x):
+            if isinstance(x, jax.Array):
+                # If it's a host-local single-device array, make it globally replicated
+                if len(x.sharding.device_set) == 1:
+                    return multihost_utils.broadcast_one_to_all(x)
+            return x
+
+        state_to_save = jax.tree_util.tree_map(make_global_array, self.state)
+
         checkpointer.save(
             os.path.join(path, "checkpoint"),
-            self.state,  # Pass sharded state directly, Orbax gathers from all hosts
+            state_to_save,
             force=True
         )
         checkpointer.wait_until_finished()
