@@ -589,19 +589,9 @@ class Pretrainer:
         np.random.set_state(rng_state["numpy_random"])
         self.key = jax_random.PRNGKey(rng_state["jax_random"])
 
-        # Load checkpoint using Orbax with proper multi-host and topology-change support
+        # Load checkpoint using Orbax
         checkpointer = ocp.StandardCheckpointer()
-        # Create abstract state on CPU for restoration
-        abstract_state = jax.tree_util.tree_map(
-            lambda x: ocp.utils.to_shape_dtype_struct(x),
-            jax.device_get(self.state)
-        )
-        # Restore with target sharding to support topology changes
-        restored = checkpointer.restore(
-            os.path.join(path, "checkpoint"),
-            args=ocp.args.StandardRestore(abstract_state),
-        )
-        # Shard to new topology
+        restored = checkpointer.restore(os.path.join(path, "checkpoint"), target=jax.device_get(self.state))
         self.state = jax.device_put(restored, self.state_sharding)
 
         # Load config
