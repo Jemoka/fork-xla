@@ -12,7 +12,7 @@ mkdir data
 mkdir checkpoints
 #gcsfuse --implicit-dirs --file-mode=777 --dir-mode=777 thoughtbubbles_data ./data
 sudo mount /dev/sdb ./data
-gcsfuse --implicit-dirs --file-mode=777 --dir-mode=777 thoughtbubbles_checkpoints_uc2 ./checkpoints
+gcsfuse --foreground --implicit-dirs --file-mode=777 --dir-mode=777 thoughtbubbles_checkpoints_uc2 ./checkpoints --rename-dir-limit 100000 &disown
 
 # repo
 curl -LsSf https://astral.sh/uv/install.sh | sh

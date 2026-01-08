@@ -42,7 +42,7 @@ from jax.experimental import multihost_utils
 
 R = Random(7)
 
-class Pretrainer:
+class Finetuner:
     def device_count(self):
         return jax.device_count()
 
@@ -77,9 +77,6 @@ class Pretrainer:
         devices = devices.reshape(-1, args.shard_into)
 
         self.mesh = Mesh(devices, axis_names=("batch", "shard")) # sharded data parallel
-
-        logger.info("DEVICES | host: {}/{} | topology: {}, mesh: {}, count: {}", jax.process_index(), jax.process_count(), devices.shape, self.mesh, jax.device_count())
-
         self.replicas = jax.device_count() // args.shard_into
         self.local_replicas = local // args.shard_into
         assert self.replicas == self.mesh.shape["batch"]
@@ -94,6 +91,9 @@ class Pretrainer:
 
         # scale *up* the total steps as a function of how many steps to accumulate
         self.total_batches = args.total_steps * self.accumulate_steps
+
+        # cache autorgeress git
+        self.__autoregress_jit = None
 
         # print statistics
         if self.main_process():
@@ -125,7 +125,7 @@ class Pretrainer:
         # initialize wandb
         if self.main_process():
             wandb.init(
-                project="fork-xla",
+                project="fork-xla-sft",
                 config=vars(args),
                 mode=None if args.wandb else "disabled",
                 name=args.experiment,
@@ -275,25 +275,24 @@ class Pretrainer:
             self.save(self.recovery_dir)
         if self.main_process():
             logger.info("Beginning training...")
-        # try:
-        self.epoch()
-        # except Exception as e:
-        #     raise e
-        #     if self.main_process():
-        #         logger.info(f"TRAIN | FAILURE | building recovery checkpoint for {e}")
-        #     try:
-        #         # move recovery checkpoint to self.recovery_dir+"_last_good"
-        #         if self.main_process():
-        #             shutil.rmtree(self.recovery_dir.removesuffix("/")+"_last_good", ignore_errors=True)
-        #             shutil.move(self.recovery_dir, self.recovery_dir.removesuffix("/")+"_last_good")
-        #         self.save(self.recovery_dir)
-        #         if self.main_process():
-        #             logger.error(f"TRAIN | FAILURE | Encountered exception {str(e)}; safely checkpointed, so we're blowing up now...")
-        #     except Exception as es:
-        #         if self.main_process():
-        #             logger.error(f"TRAIN | FAILURE | Encountered exception {str(e)}; CHECKPOINT FAILED with '{str(es)}', but eh, so we're blowing up anyways...")
-        #         raise e
-        #     raise e
+        try:
+            self.epoch()
+        except Exception as e:
+            if self.main_process():
+                logger.info(f"TRAIN | FAILURE | building recovery checkpoint for {e}")
+            try:
+                # move recovery checkpoint to self.recovery_dir+"_last_good"
+                if self.main_process():
+                    shutil.rmtree(self.recovery_dir.removesuffix("/")+"_last_good", ignore_errors=True)
+                    shutil.move(self.recovery_dir, self.recovery_dir.removesuffix("/")+"_last_good")
+                self.save(self.recovery_dir)
+                if self.main_process():
+                    logger.error(f"TRAIN | FAILURE | Encountered exception {str(e)}; safely checkpointed, so we're blowing up now...")
+            except Exception as es:
+                if self.main_process():
+                    logger.error(f"TRAIN | FAILURE | Encountered exception {str(e)}; CHECKPOINT FAILED with '{str(es)}', but eh, so we're blowing up anyways...")
+                raise e
+            raise e
         self.finish()
 
     def finish(self):
@@ -337,6 +336,7 @@ class Pretrainer:
                     logits, loss = state.apply_fn(
                         {'params': params},
                         x, y,
+                        padding_mask=padding_mask,
                         deterministic=False,
                         rngs={'dropout': dropout_key}
                     )
@@ -388,8 +388,6 @@ class Pretrainer:
             padding_mask, self.mesh, self.data_pspec
         )
 
-
-
         # because batch is fixed we should be jitting the inner function
 
         def valid_step_inner(state, batch):
@@ -399,7 +397,7 @@ class Pretrainer:
                 loss_sum, count = carry
                 x_i, y_i, mask_i = xb  # (B_local, T)
 
-                _, loss_i = state.apply_fn({'params': state.params}, x_i, y_i, deterministic=True)
+                _, loss_i = state.apply_fn({'params': state.params}, x_i, y_i, padding_mask=mask_i, deterministic=True)
                 n = x_i.shape[0] * x_i.shape[1]
                 return (loss_sum + loss_i * n, count + n), None
 
@@ -434,6 +432,61 @@ class Pretrainer:
             return score, metrics
 
         return valid_step_wrapper
+
+    @staticmethod
+    def _autoregress(state, input, input_mask, num_tokens, temperature):
+        seq = jnp.arange(num_tokens)
+
+        inp_buf = jnp.zeros((len(input), input.shape[1] + num_tokens))
+        mask_buf = jnp.zeros((len(input), input_mask.shape[1] + num_tokens))
+
+        inp_buf = inp_buf.at[:, :input.shape[1]].set(input)
+        mask_buf = mask_buf.at[:, :input_mask.shape[1]].set(input_mask)
+        inp_buf, mask_buf = inp_buf.astype(jnp.int32), mask_buf.astype(jnp.bool_)
+
+        def reduce(carry, xb):
+            inputs, masks = carry
+            offset = xb + input.shape[1]
+
+            outputs, loss_i = state.apply_fn(
+                {'params': state.params},
+                inputs,
+                padding_mask=masks,
+                deterministic=True
+            )
+
+            next_token = outputs[:, offset-1, :] / temperature
+            next_token = jax.nn.softmax(next_token, axis=-1)
+            
+            next_mask = jnp.ones_like(next_token, dtype=jnp.bool_)
+            new_inputs = inputs.at[:, offset].set(next_token)
+            new_masks = masks.at[:, offset].set(next_mask)
+            
+            return (new_inputs, new_masks), None
+
+        (final_inputs, final_masks), _ = jax.lax.scan(reduce, (inp_buf, mask_buf), seq)
+        return final_inputs
+
+    def generate(self, prompts, num_tokens=128, temperature=1.0):
+        if self.__autoregress_jit is None:
+            self.__autoregress_jit = jax.jit(
+                self._autoregress,
+                in_shardings=(self.state_sharding, None, None),
+                out_shardings=None,
+                static_argnames=("num_tokens", "temperature"),
+            )
+
+        input, input_mask = self.pad(prompts, pad_token=0)
+        output = self.__autoregress_jit(self.state, input, input_mask, num_tokens, temperature=temperature)
+
+        return jax.device_get(output)
+
+    @staticmethod
+    def pad(seqs, pad_token=0):
+        max_len = max(len(s) for s in seqs)
+        padded_seqs = [([pad_token] * (max_len - len(s)))+s for s in seqs]
+        padded_masks = [([False] * (max_len - len(s)))+[True for _ in s] for s in seqs]
+        return jnp.array(padded_seqs), jnp.array(padded_masks)
 
     def epoch(self):
         if self.main_process():
@@ -546,7 +599,7 @@ class Pretrainer:
                     indx % self.accumulate_steps == 0 and
                     (indx // self.accumulate_steps)
                     % self.args.checkpoint_interval
-                    == (self.args.checkpoint_interval//2) # offset checkpoint to not crash with val
+                    == (self.args.checkpoint_interval) # offset checkpoint to not crash with val
             ):
                 self.save(str(self.save_dir / str(indx // self.accumulate_steps)))
 
@@ -556,7 +609,7 @@ class Pretrainer:
                     indx % self.accumulate_steps == 0 and
                     (indx // self.accumulate_steps)
                     % self.args.validation_interval
-                    == (self.args.validation_interval//3) # so we don't ovelap with checkpoint
+                    == (self.args.validation_interval//2) # so we don't ovelap with checkpoint
             ):
                 score, val_metrics = valid_step(self.state)
                 val_metrics["train/tokens"] = (
@@ -579,6 +632,80 @@ class Pretrainer:
                         logger.info("VAL | BEST SCORE | score {}", score)
                     self.best_val_score_ = score
                     self.save(self.best_dir)
+
+    def __dangerously_migrate_for_finetuning(self):
+        if self.main_process():
+            logger.info(f"TRAINER | Resetting myself for finetuning... This operation is **NOT IDEMPOTENT** and is in fact jank af.")
+
+        # Get state off device to manipulate it
+        logger.debug("RESET | Getting optimizer to host device...")
+        state_cpu = jax.device_get(self.state)
+
+        # first, reset all step counts to 0
+        logger.debug("RESET | Resetting step and optim counters to 0...")
+        def reset_steps(x):
+            if (x == self.global_step_counter_).all():
+                return jnp.full_like(x, 0)
+            return x
+
+        state_cpu = state_cpu.replace(step=0, opt_state=jax.tree_util.tree_map(reset_steps, state_cpu.opt_state))
+
+        # Create new learning rate schedule
+        logger.debug("RESET | Building new optim schedule...")
+        warmup_steps = int((self.total_batches // self.accumulate_steps) * self.args.warmup_pct)
+        decay_steps = int((self.total_batches // self.accumulate_steps) * self.args.decay_pct)
+        stable_steps = (self.total_batches // self.accumulate_steps) - warmup_steps - decay_steps
+
+        warmup_schedule = optax.linear_schedule(
+            init_value=self.args.lr * 0.01,
+            end_value=self.args.lr,
+            transition_steps=warmup_steps
+        )
+        stable_schedule = optax.constant_schedule(self.args.lr)
+        decay_schedule = optax.cosine_decay_schedule(
+            init_value=self.args.lr,
+            alpha=0.1,
+            decay_steps=decay_steps
+        )
+
+        new_schedule = optax.join_schedules(
+            schedules=[warmup_schedule, stable_schedule, decay_schedule],
+            boundaries=[warmup_steps, warmup_steps + stable_steps]
+        )
+
+        # Create new base optimizer
+        if self.args.optimizer == "adamw":
+            new_tx = self.model.configure_optimizers_adamw(
+                weight_decay=self.args.weight_decay,
+                learning_rate=new_schedule,
+                betas=(self.args.beta1, self.args.beta2),
+                device_type="gpu" if jax.devices()[0].platform == "gpu" else "tpu",
+            )
+        else:
+            raise RuntimeError("Only AdamW optimizer supported")
+
+        # Create new state with fresh optimizer state and step=0, but keep existing params
+        logger.debug("RESET | Replacing optimizer in state...")
+        state_cpu = state_cpu.replace(tx=new_tx)
+
+        # Put back on device with proper sharding
+        logger.debug("RESET | Resharding optimizer...")
+        self.state_sharding = flax.linen.logical_to_mesh_sharding(
+            flax.linen.get_partition_spec(state_cpu), self.mesh, rules=SHARDING_PLAN
+        )
+        self.state = jax.device_put(state_cpu, self.state_sharding)
+
+        logger.debug("RESET | Bookeeping...")
+        # Reset global step counter
+        self.global_step_counter_ = 0
+        self.best_val_score_ = float("-inf")  # "score" means higher is better
+
+        # Store new schedule and optimizer for reference
+        self.schedule = new_schedule
+        self.tx = new_tx
+
+        if self.main_process():
+            logger.info(f"TRAINER | Safely reset, moving on...")
 
     def load(self, path):
         logger.debug("CHECKPOINT | loading checkpoint from {}", path)
@@ -661,7 +788,8 @@ class Pretrainer:
         multihost_utils.sync_global_devices("save:post")
 
     @classmethod
-    def from_pretrained(cls, path, disable_wandb=True, distributed=False):
+    def from_checkpoint(cls, path, disable_wandb=True, distributed=False):
+        """load from a midtraining checkpoint"""
         with open(os.path.join(path, "config.json"), "r") as df:
             data = json.load(df)
         args = Namespace(**data.get("config", {}))
@@ -671,5 +799,41 @@ class Pretrainer:
 
         if disable_wandb:
             new.args.wandb = False
+
+        return new
+
+    @classmethod
+    def from_pretrained(cls, path, args, disable_wandb=True, distributed=False):
+        """load from a pretrained checkpoint checkpoint"""
+
+        with open(os.path.join(path, "config.json"), "r") as df:
+            data = json.load(df)
+        old_args = Namespace(**data.get("config", {}))
+
+        # we want to keep new args for all training logistics, but model creation
+        # arguments we want to keep with the old args
+        args.block_size = old_args.block_size
+        args.vocab_size = old_args.vocab_size
+        args.n_head = old_args.n_head
+        args.n_embd = old_args.n_embd
+        args.dropout = old_args.dropout
+        args.bias = old_args.bias
+        args.max_block_size = old_args.max_block_size
+        args.plan = old_args.plan
+        args.merge_killed_tokens = old_args.merge_killed_tokens
+        args.averaging_method = old_args.averaging_method
+
+        # initialize new class
+        new = cls(args, distributed=distributed)
+        new.load(path)
+        new.args = args # since .load(...) resets args
+
+        if disable_wandb:
+            new.args.wandb = False
+
+        # reset for midtraining
+        multihost_utils.sync_global_devices("reset:pre")
+        new.__dangerously_migrate_for_finetuning()
+        multihost_utils.sync_global_devices("reset:post")
 
         return new
