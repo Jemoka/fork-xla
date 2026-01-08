@@ -471,13 +471,13 @@ class Finetuner:
         if self.__autoregress_jit is None:
             self.__autoregress_jit = jax.jit(
                 self._autoregress,
-                in_shardings=(self.state_sharding, None, None),
+                in_shardings=(self.state_sharding, None, None, None),
                 out_shardings=None,
                 static_argnames=("num_tokens", "temperature"),
             )
 
         input, input_mask = self.pad(prompts, pad_token=0)
-        output = self.__autoregress_jit(self.state, input, input_mask, num_tokens, temperature=temperature)
+        output = self.__autoregress_jit(self.state, input, input_mask, num_tokens, temperature)
 
         return jax.device_get(output)
 
