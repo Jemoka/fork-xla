@@ -446,8 +446,14 @@ class Finetuner:
 
         def reduce(carry, xb):
             inputs, masks = carry
-            outputs, loss_i = state.apply_fn({'params': state.params}, inputs, padding_mask=masks, deterministic=True)
             offset = xb + input.shape[1]
+
+            outputs, loss_i = state.apply_fn(
+                {'params': state.params},
+                inputs[:, :offset],
+                padding_mask=masks[:, :offset],
+                deterministic=True
+            )
 
             next_token = jnp.argmax(outputs[:, -1, :], axis=-1)
             next_mask = jnp.ones_like(next_token, dtype=jnp.bool_)
@@ -456,7 +462,7 @@ class Finetuner:
             
             return (new_inputs, new_masks), None
 
-        (final_inputs, final_masks), _ = jax.lax.scan(reduce, (input, input_mask), seq)
+        (final_inputs, final_masks), _ = jax.lax.scan(reduce, (inp_buf, mask_buf), seq)
         return final_inputs
 
     def generate(self, prompts, num_tokens=128):

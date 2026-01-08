@@ -48,9 +48,12 @@ self = Finetuner(args)
 # eos_token = enc.encode("<|endoftext|>", allowed_special={'<|endoftext|>'})[0]
 # eos_token
 res = self.generate(enc.encode_batch(["I'm a big ol' chicken, but", "3+12"])) 
-self.pad(enc.encode_batch(["I'm a big ol' chicken, but", "3+12"])[0]).shape
-res.shape
-prompts = enc.encode_batch(["I'm a big ol' chicken, but", "3+12"])
+enc.encode_batch(["I'm a big ol' chicken, but", "3+12"])
+res
+
+# self.pad(enc.encode_batch(["I'm a big ol' chicken, but", "3+12"])[0]).shape
+# res.shape
+# prompts = enc.encode_batch(["I'm a big ol' chicken, but", "3+12"])
 
 # prompts=
 
