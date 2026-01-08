@@ -589,9 +589,19 @@ class Pretrainer:
         np.random.set_state(rng_state["numpy_random"])
         self.key = jax_random.PRNGKey(rng_state["jax_random"])
 
-        # Load checkpoint using Orbax
+        # Load checkpoint using Orbax with proper multi-host and topology-change support
         checkpointer = ocp.StandardCheckpointer()
-        restored = checkpointer.restore(os.path.join(path, "checkpoint"), target=jax.device_get(self.state))
+        # Create abstract state on CPU for restoration
+        abstract_state = jax.tree_util.tree_map(
+            lambda x: ocp.utils.to_shape_dtype_struct(x),
+            jax.device_get(self.state)
+        )
+        # Restore with target sharding to support topology changes
+        restored = checkpointer.restore(
+            os.path.join(path, "checkpoint"),
+            args=ocp.args.StandardRestore(abstract_state),
+        )
+        # Shard to new topology
         self.state = jax.device_put(restored, self.state_sharding)
 
         # Load config
@@ -607,12 +617,9 @@ class Pretrainer:
 
         multihost_utils.sync_global_devices("save:pre")
 
-        # Write to fast local temp, then move to final (possibly slow) path
-        import tempfile
-        temp_path = os.path.join(tempfile.gettempdir(), f"checkpoint_{os.path.basename(path)}_{time.time()}")
-
+        # Write directly to shared filesystem path (multi-host safe)
         if self.main_process():
-            os.makedirs(temp_path, exist_ok=True)
+            os.makedirs(path, exist_ok=True)
             logger.debug("CHECKPOINT | created checkpoint directory")
 
             # Save random state
@@ -621,22 +628,11 @@ class Pretrainer:
                 "numpy_random": np.random.get_state(),
                 "jax_random": int(self.key[0]),  # Save seed
             }
-            np.save(os.path.join(temp_path, "rng.npy"), rng_state)
+            np.save(os.path.join(path, "rng.npy"), rng_state)
             logger.debug("CHECKPOINT | saved random state")
 
-        # Save checkpoint
-        checkpointer = ocp.StandardCheckpointer()
-        checkpointer.save(
-            os.path.join(temp_path, "checkpoint"),
-            jax.device_get(self.state),
-            force=True
-        )
-        checkpointer.wait_until_finished()
-        logger.debug("CHECKPOINT | saved training state")
-
-        if self.main_process():
             # Save config
-            with open(os.path.join(temp_path, "config.json"), "w") as df:
+            with open(os.path.join(path, "config.json"), "w") as df:
                 json.dump(
                     {
                         "config": vars(self.args),
@@ -648,14 +644,20 @@ class Pretrainer:
                 )
             logger.debug("CHECKPOINT | saved configuration")
 
-        multihost_utils.sync_global_devices("save:post")
+        multihost_utils.sync_global_devices("save:mid")
 
-        # Main process copies from temp to final location (cross-device safe)
-        if self.main_process():
-            shutil.rmtree(path, ignore_errors=True)
-            shutil.copytree(temp_path, path, dirs_exist_ok=True, ignore_dangling_symlinks=True)
-            shutil.rmtree(temp_path, ignore_errors=True)
-            logger.debug("CHECKPOINT | moved to {}", path)
+        # Save checkpoint - Orbax handles multi-host coordination automatically
+        # All hosts participate in saving their shards to shared filesystem
+        checkpointer = ocp.StandardCheckpointer()
+        checkpointer.save(
+            os.path.join(path, "checkpoint"),
+            self.state,  # Pass sharded state directly, Orbax gathers from all hosts
+            force=True
+        )
+        checkpointer.wait_until_finished()
+        logger.debug("CHECKPOINT | saved training state")
+
+        multihost_utils.sync_global_devices("save:post")
 
     @classmethod
     def from_pretrained(cls, path, disable_wandb=True, distributed=False):
