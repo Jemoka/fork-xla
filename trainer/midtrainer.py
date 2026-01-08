@@ -671,17 +671,15 @@ class Midtrainer:
         self.global_step_counter_ = data.get("steps", 0)
         self.best_val_score_ = data.get("score", 0)
 
+
     def save(self, path):
         logger.debug("CHECKPOINT | saving checkpoint at {}", path)
 
         multihost_utils.sync_global_devices("save:pre")
 
-        # Write to fast local temp, then move to final (possibly slow) path
-        import tempfile
-        temp_path = os.path.join(tempfile.gettempdir(), f"checkpoint_{os.path.basename(path)}_{time.time()}")
-
+        # Write directly to shared filesystem path (multi-host safe)
         if self.main_process():
-            os.makedirs(temp_path, exist_ok=True)
+            os.makedirs(path, exist_ok=True)
             logger.debug("CHECKPOINT | created checkpoint directory")
 
             # Save random state
@@ -690,22 +688,11 @@ class Midtrainer:
                 "numpy_random": np.random.get_state(),
                 "jax_random": int(self.key[0]),  # Save seed
             }
-            np.save(os.path.join(temp_path, "rng.npy"), rng_state)
+            np.save(os.path.join(path, "rng.npy"), rng_state)
             logger.debug("CHECKPOINT | saved random state")
 
-        # Save checkpoint
-        checkpointer = ocp.StandardCheckpointer()
-        checkpointer.save(
-            os.path.join(temp_path, "checkpoint"),
-            jax.device_get(self.state),
-            force=True
-        )
-        checkpointer.wait_until_finished()
-        logger.debug("CHECKPOINT | saved training state")
-
-        if self.main_process():
             # Save config
-            with open(os.path.join(temp_path, "config.json"), "w") as df:
+            with open(os.path.join(path, "config.json"), "w") as df:
                 json.dump(
                     {
                         "config": vars(self.args),
@@ -717,14 +704,31 @@ class Midtrainer:
                 )
             logger.debug("CHECKPOINT | saved configuration")
 
-        multihost_utils.sync_global_devices("save:post")
+        multihost_utils.sync_global_devices("save:mid")
 
-        # Main process copies from temp to final location (cross-device safe)
-        if self.main_process():
-            shutil.rmtree(path, ignore_errors=True)
-            shutil.copytree(temp_path, path, dirs_exist_ok=True, ignore_dangling_symlinks=True)
-            shutil.rmtree(temp_path, ignore_errors=True)
-            logger.debug("CHECKPOINT | moved to {}", path)
+        # Save checkpoint - convert host-local arrays to global arrays for multi-host
+        # This handles replicated scalars like 'step' that have SingleDeviceSharding
+        checkpointer = ocp.StandardCheckpointer()
+
+        # Convert any host-local arrays to globally replicated arrays
+        def make_global_array(x):
+            if isinstance(x, jax.Array):
+                # If it's a host-local single-device array, make it globally replicated
+                if len(x.sharding.device_set) == 1:
+                    return multihost_utils.broadcast_one_to_all(x)
+            return x
+
+        state_to_save = jax.tree_util.tree_map(make_global_array, self.state)
+
+        checkpointer.save(
+            os.path.join(path, "checkpoint"),
+            state_to_save,
+            force=True
+        )
+        checkpointer.wait_until_finished()
+        logger.debug("CHECKPOINT | saved training state")
+
+        multihost_utils.sync_global_devices("save:post")
 
     @classmethod
     def from_checkpoint(cls, path, disable_wandb=True, distributed=False):

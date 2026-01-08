@@ -18,13 +18,14 @@ logger.add(
     filter=lambda x: x["extra"].get("task", "") != "plot",
 )
 
-from trainer import Finetuner
+from trainer import Finetuner, Pretrainer
 from commands import configure
 import os
 import json
 from argparse import Namespace
 # !nvidia-smi
-# !git fetch && git checkout 7cd57d8f5e0a69a4803a5432d58839c84a0fb7e7
+# !git fetch && git checkout 33a608457c7f95d23fa8aa9f8125067b80486c23
+# 7cd57d8f5e0a69a4803a5432d58839c84a0fb7e7
 
 # c124aede21d21cf1d6be0a56fb026ef7f1eed66d
 # 1+1
@@ -38,18 +39,33 @@ args = configure(
     plan=["regular", "regular", "regular", "regular"]
 )
 
-# self = Midtrainer.from_checkpoint("/sphinx/u/houjun/checkpoints/fork/jax/midtrain/final_midtrain_1_9b_baseline/best")
+trainer = Pretrainer.from_pretrained("/sphinx/u/houjun/checkpoints/fork/jax/pretrain/best")
+
+# 
+self = SillyFinetuner.from_pretrained("/sphinx/u/houjun/checkpoints/fork/jax/pretrain/old/final_pretrain_1_9b_baseline/checkpoint/184320", args)
+self
 # self.model
 from tiktoken import get_encoding
 enc = get_encoding("gpt2")
-self = Finetuner(args)
+# self = Finetuner(args)
 
-# enc.encode("<|endoftext|>")
-# eos_token = enc.encode("<|endoftext|>", allowed_special={'<|endoftext|>'})[0]
-# eos_token
-res = self.generate(enc.encode_batch(["I'm a big ol' chicken, but", "3+12"])) 
-enc.encode_batch(["I'm a big ol' chicken, but", "3+12"])
-res
+# # enc.encode("<|endoftext|>")
+# # eos_token = enc.encode("<|endoftext|>", allowed_special={'<|endoftext|>'})[0]
+# # eos_token
+# res = self.generate(enc.encode_batch(["The Federal Reserve said last Tuesday that"])) 
+# # enc.encode_batch(["I'm a big ol' chicken, but", "3+12"])
+# print(enc.decode_batch(res.tolist())[0])
+# enc.decode_batch(x.tolist())[0]
+
+# import jax
+# x,y,_ = trainer.batch()
+# x,y = jax.device_put((x[:2],y[:2]))
+# trainer.state.apply_fn({"params": trainer.state.params}, x, y, padding_mask=None)[1]
+# l
+# # print(enc.decode_batch(x.tolist())[0])
+
+# l
+
 
 # self.pad(enc.encode_batch(["I'm a big ol' chicken, but", "3+12"])[0]).shape
 # res.shape
