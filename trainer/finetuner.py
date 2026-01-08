@@ -437,8 +437,8 @@ class Finetuner:
     def _autoregress(state, input, input_mask, num_tokens):
         seq = jnp.arange(num_tokens)
 
-        inp_buf = jnp.zeros((len(input), num_tokens))
-        mask_buf = jnp.zeros((len(input), num_tokens))
+        inp_buf = jnp.zeros((len(input), input.shape[1] + num_tokens))
+        mask_buf = jnp.zeros((len(input), input_mask.shape[1] + num_tokens))
 
         inp_buf = inp_buf.at[:, :input.shape[1]].set(input)
         mask_buf = mask_buf.at[:, :input_mask.shape[1]].set(input_mask)
