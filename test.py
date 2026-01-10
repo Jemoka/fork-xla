@@ -1,6 +1,8 @@
 from trainer import Pretrainer
 import jax
 
+jax.distributed.initialize()
+
 trainer = Pretrainer.from_pretrained("/home/houjun/checkpoints/final_pretrain_1_9b_regular/best")
 
 x,y,_ = trainer.batch()
