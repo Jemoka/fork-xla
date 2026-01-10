@@ -5,6 +5,4 @@ jax.distributed.initialize()
 
 trainer = Pretrainer.from_pretrained("/home/houjun/checkpoints/final_pretrain_1_9b_regular/checkpoint/61440")
 
-print(jax.device_get(trainer.state).opt_state[1][0].mu["blocks_0"]["attn"]["c_proj"]["kernel"].value.mean())
-print(jax.device_get(trainer.state).opt_state[1][0].mu["blocks_0"]["attn"]["c_proj"]["kernel"].value)
-print(jax.device_get(trainer.state).opt_state[1][0].mu["blocks_0"]["attn"]["c_proj"]["kernel"].value.shape)
+print(jax.tree_util.tree_reduce(lambda carry, xs:carry+xs, jax.tree_util.tree_map(lambda x:x.mean(), trainer.state.params)))
