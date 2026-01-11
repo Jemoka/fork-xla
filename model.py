@@ -187,7 +187,7 @@ class CausalSelfAttention(nn.Module):
         # Compute token counts for fractional rotations
         block_size = self.config.block_size
         token_counts = jnp.zeros((*token_index.shape[:-1], block_size), dtype=token_index.dtype)
-        token_counts = token_counts.at[..., token_index].add(1)
+        token_counts = token_counts.at[jnp.arange(token_counts.shape[0])[:, None], token_index].add(1)
 
         partial_rotations = jnp.cumsum(
             jnp.take_along_axis(1 / (token_counts + 1e-10), token_index, axis=-1),
