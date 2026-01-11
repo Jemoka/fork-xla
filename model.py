@@ -298,7 +298,6 @@ class Block(nn.Module):
 
     def __call__(self, x, cumulative_scores, token_index, padding_mask=None,
                  layer_num=None, deterministic=False):
-        jax.debug.print("{}", x.shape)
         exponentiated_scores = jnp.exp(cumulative_scores)
         x = x + jnp.einsum("bl,blh->blh", exponentiated_scores,
                            self.attn(self.ln_1(x), cumulative_scores, token_index,

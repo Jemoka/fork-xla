@@ -388,8 +388,6 @@ class Pretrainer:
             padding_mask, self.mesh, self.data_pspec
         )
 
-
-
         # because batch is fixed we should be jitting the inner function
 
         def valid_step_inner(state, batch):
