@@ -52,7 +52,7 @@ srun --export=ALL bash -lc '
       --max_block_size 1024 \
       --n_head 16 \
       --out_dir /sphinx/u/houjun/checkpoints/fork/jax/pretrain \
-      --per_device_batch_size 8 \
+      --per_device_batch_size 4 \
       --validation_interval 2048 \
       --checkpoint_interval 40960 \
       --validation_steps 2048 \
