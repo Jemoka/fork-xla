@@ -589,8 +589,8 @@ class Pretrainer:
 
         # Load checkpoint using Orbax
         checkpointer = ocp.StandardCheckpointer()
-        restored = checkpointer.restore(os.path.join(path, "checkpoint"), target=jax.device_get(self.state))
-        self.state = jax.device_put(restored, self.state_sharding)
+        self.state = checkpointer.restore(os.path.join(path, "checkpoint"), target=self.state)
+        # self.state = jax.device_put(restored, self.state_sharding)
 
         # Load config
         with open(os.path.join(path, "config.json"), "r") as df:

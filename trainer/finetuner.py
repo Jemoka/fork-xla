@@ -433,51 +433,100 @@ class Finetuner:
 
         return valid_step_wrapper
 
+
     @staticmethod
-    def _autoregress(state, input, input_mask, num_tokens, temperature):
+    def _autoregress(state, key, input, input_mask, num_tokens, temperature, top_p):
+
+        def top_p_filter_logits(logits: jnp.ndarray, top_p: float) -> jnp.ndarray:
+            """
+            Nucleus (top-p) filtering on logits.
+            logits: [B, V]
+            Returns logits with tokens outside the nucleus set to -inf.
+            """
+            if top_p >= 1.0:
+                return logits
+
+            # Sort logits descending
+            sort_idx = jnp.argsort(logits, axis=-1)[:, ::-1]              # [B, V]
+            sorted_logits = jnp.take_along_axis(logits, sort_idx, axis=-1) # [B, V]
+
+            # Convert to probs and compute cumulative mass in sorted order
+            sorted_probs = jax.nn.softmax(sorted_logits, axis=-1)          # [B, V]
+            cumprobs = jnp.cumsum(sorted_probs, axis=-1)                   # [B, V]
+
+            # Keep tokens while cumprob <= top_p, but always keep at least 1 token
+            keep_sorted = cumprobs <= top_p
+            keep_sorted = keep_sorted.at[:, 0].set(True)                   # ensure ≥1 token
+
+            # Map keep mask back to original vocab order
+            keep = jnp.zeros_like(logits, dtype=jnp.bool_)
+            keep = keep.at[jnp.arange(logits.shape[0])[:, None], sort_idx].set(keep_sorted)
+
+            neg_inf = jnp.array(-jnp.inf, dtype=logits.dtype)
+            return jnp.where(keep, logits, neg_inf)
+
+
+
         seq = jnp.arange(num_tokens)
 
-        inp_buf = jnp.zeros((len(input), input.shape[1] + num_tokens))
-        mask_buf = jnp.zeros((len(input), input_mask.shape[1] + num_tokens))
+        B, T_in = input.shape
+        T_total = T_in + num_tokens
 
-        inp_buf = inp_buf.at[:, :input.shape[1]].set(input)
-        mask_buf = mask_buf.at[:, :input_mask.shape[1]].set(input_mask)
-        inp_buf, mask_buf = inp_buf.astype(jnp.int32), mask_buf.astype(jnp.bool_)
+        inp_buf = jnp.zeros((B, T_total), dtype=jnp.int32)
+        mask_buf = jnp.zeros((B, T_total), dtype=jnp.bool_)
 
-        def reduce(carry, xb):
-            inputs, masks = carry
-            offset = xb + input.shape[1]
+        inp_buf = inp_buf.at[:, :T_in].set(input.astype(jnp.int32))
+        mask_buf = mask_buf.at[:, :T_in].set(input_mask.astype(jnp.bool_))
+
+        def reduce(carry, step):
+            inputs, masks, key = carry
+            offset = T_in + step  # position we will WRITE into this step
 
             outputs, loss_i = state.apply_fn(
-                {'params': state.params},
+                {"params": state.params},
                 inputs,
                 padding_mask=masks,
-                deterministic=True
+                deterministic=True,
             )
 
-            next_token = outputs[:, offset-1, :] / temperature
-            next_token = jax.nn.softmax(next_token, axis=-1)
-            
-            next_mask = jnp.ones_like(next_token, dtype=jnp.bool_)
-            new_inputs = inputs.at[:, offset].set(next_token)
-            new_masks = masks.at[:, offset].set(next_mask)
-            
-            return (new_inputs, new_masks), None
+            # logits for the next token at position offset-1
+            logits = outputs[:, offset - 1, :]  # [B, V]
 
-        (final_inputs, final_masks), _ = jax.lax.scan(reduce, (inp_buf, mask_buf), seq)
-        return final_inputs
+            # sample token ids
+            if temperature == 0.0:
+                next_token = jnp.argmax(logits, axis=-1).astype(jnp.int32)  # [B]
+            else:
+                key, subkey = jax.random.split(key)
+                scaled = logits / temperature
+                if top_p is not None:
+                    scaled = top_p_filter_logits(scaled, float(top_p))
+                next_token = jax.random.categorical(
+                    subkey, scaled, axis=-1
+                ).astype(jnp.int32)  # [B]
 
-    def generate(self, prompts, num_tokens=128, temperature=1.0):
+            inputs = inputs.at[:, offset].set(next_token)
+            masks = masks.at[:, offset].set(True)
+
+            return (inputs, masks, key), None
+
+        (final_inputs, final_masks, _), _ = jax.lax.scan(reduce, (inp_buf, mask_buf, key), seq)
+        return final_inputs  # contains prompt + generated ids
+
+    def generate(self, prompts, num_tokens=128, temperature=1.0, top_p=0.9):
         if self.__autoregress_jit is None:
             self.__autoregress_jit = jax.jit(
                 self._autoregress,
                 in_shardings=(self.state_sharding, None, None, None),
                 out_shardings=None,
-                static_argnames=("num_tokens", "temperature"),
+                static_argnames=("num_tokens", "temperature", "top_p"),
             )
 
         input, input_mask = self.pad(prompts, pad_token=0)
-        output = self.__autoregress_jit(self.state, input, input_mask, num_tokens, temperature)
+        self.key, key = jax.random.split(self.key)
+
+        output = self.__autoregress_jit(
+            self.state, key, input, input_mask, num_tokens, float(temperature), top_p
+        )
 
         return jax.device_get(output)
 
