@@ -516,7 +516,12 @@ class Finetuner:
         if self.__autoregress_jit is None:
             self.__autoregress_jit = jax.jit(
                 self._autoregress,
-                in_shardings=(self.state_sharding, None, None, None),
+                in_shardings=(
+                    self.state_sharding,
+                    None,
+                    NamedSharding(self.mesh, P("batch", None)),
+                    NamedSharding(self.mesh, P("batch", None))
+                ),
                 out_shardings=None,
                 static_argnames=("num_tokens", "temperature", "top_p"),
             )
