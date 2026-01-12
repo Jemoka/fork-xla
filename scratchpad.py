@@ -47,7 +47,7 @@ args = configure(
 # trainer = Finetuner.from_pretrained("/sphinx/u/houjun/checkpoints/fork/jax/pretrain/best", args)
 
 trainer = Pretrainer.from_pretrained(
-    "/sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_fork/chicken",
+    "/sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_fork/checkpoint/20480",
 )
 
 # !git fetch && git checkout 104ce8fe5b9f7f2a0b3e210fd95d1da1ce7d862b
@@ -59,10 +59,19 @@ self = SillyFinetuner.from_pretrained("/sphinx/u/houjun/checkpoints/fork/jax/pre
 # self.model
 from tiktoken import get_encoding
 enc = get_encoding("gpt2")
-# self = Finetuner(args)
-
-prompts = enc.encode_batch(["31 Privat drive"])
+prompts = enc.encode_batch(["In research, NLP---which stands for"])
 # print(enc.decode_batch(res.tolist())[0])
+
+from flywheel import MemmapDataset, PaddedDataset, Strategy, Sampling
+ds = PaddedDataset(trainer.args, "/sphinx/u/houjun/dataset/gsm8k_aug/")
+ds = Strategy(trainer.args, [Sampling(ds, 1.0)])
+
+# x,y,p = ds.get_batch(32)
+# p
+# y
+# x
+
+
 
 
 def generate(prompts, num_tokens=128, temperature=1.0, top_p=0.9):

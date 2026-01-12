@@ -2,7 +2,7 @@
 
 #SBATCH --account=nlp
 #SBATCH --partition=sphinx
-#SBATCH --job-name=houjun-forking-final_midtrain_1_9b_baseline
+#SBATCH --job-name=houjun-forking-final_midtrain_1_9b_fork
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --ntasks-per-node=1
@@ -11,7 +11,7 @@
 #SBATCH --time=14-0
 #SBATCH --nodelist=sphinx11,sphinx10
 #SBATCH --open-mode=append
-#SBATCH --output=./logs/final_midtrain_1_9b_baseline.log
+#SBATCH --output=./logs/final_midtrain_1_9b_fork.log
 
 set -euo pipefail
 
@@ -42,18 +42,13 @@ srun --export=ALL bash -lc '
     source .venv/bin/activate && \
     uv run python \
       main.py \
-      final_midtrain_1_9b_baseline \
-      --warm_start /sphinx/u/houjun/checkpoints/fork/final_midtrain_1_9b_baseline/recovery \
-      --midtrain /sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_baseline/checkpoint/184320 \
+      test_20480_midtrain_fork \
+      --warm_start /sphinx/u/houjun/checkpoints/fork/midtrain/test_20480_midtrain_fork/recovery \
+      --midtrain /sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_fork/checkpoint/20480 \
       --data_file /juice2/scr2/houjun/fork-xla/experiments/data/midtrain.toml \
-      --plan $(printf "regular %.0s" {1..36}) \
       --flops_promised 989e12 \
-      --block_size 512 \
-      --max_block_size 1024 \
-      --n_head 16 \
-      --n_embd 2048 \
       --out_dir /sphinx/u/houjun/checkpoints/fork/jax/midtrain \
-      --per_device_batch_size 32 \
+      --per_device_batch_size 4 \
       --validation_interval 256 \
       --checkpoint_interval 2048 \
       --validation_steps 64 \
