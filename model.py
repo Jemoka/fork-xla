@@ -408,7 +408,7 @@ class ForkingBlock(Block):
     def __call__(self, x, cumulative_scores, token_index, padding_mask=None,
                  layer_num=None, deterministic=False, T=None):
         # Fork first
-        x, cumulative_scores, token_index = self.fork(x, cumulative_scores, token_index, padding_mask, T=t)
+        x, cumulative_scores, token_index = self.fork(x, cumulative_scores, token_index, padding_mask, T=T)
 
         return super().__call__(
             x,
