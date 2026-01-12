@@ -297,7 +297,7 @@ class Block(nn.Module):
         self.mlp = MLP(self.config)
 
     def __call__(self, x, cumulative_scores, token_index, padding_mask=None,
-                 layer_num=None, deterministic=False):
+                 layer_num=None, deterministic=False, T=None):
         exponentiated_scores = jnp.exp(cumulative_scores)
         x = x + jnp.einsum("bl,blh->blh", exponentiated_scores,
                            self.attn(self.ln_1(x), cumulative_scores, token_index,
@@ -333,7 +333,7 @@ class ForkingBlock(Block):
         return jnp.clip(logsigmoid, a_min=min_val)
 
     @nn.compact
-    def fork(self, x, cumulative_scores, token_index, padding_mask):
+    def fork(self, x, cumulative_scores, token_index, padding_mask, T=None):
         """Top-k forking implementation"""
 
         batch_size = cumulative_scores.shape[0] # (batch_size, k)
@@ -361,7 +361,12 @@ class ForkingBlock(Block):
         )
 
         # Perform top-k selection
-        k = min(self.config.max_block_size, forking_scores_cum_for_topk.shape[-1])
+        if T is not None:
+            # blockwise scaling as the same ratio as train time
+            k = int(math.ceil(T*(self.config.max_block_size/self.config.block_size)))
+        else:
+            k = self.config.max_block_size
+        k = min(k, forking_scores_cum_for_topk.shape[-1])
         _, top_k_indices = lax.top_k(forking_scores_cum_for_topk, k)
         top_k_indices = jnp.sort(top_k_indices, axis=-1)
 
@@ -401,9 +406,9 @@ class ForkingBlock(Block):
         return x_to_consider, new_cumulative_scores, new_token_indices
 
     def __call__(self, x, cumulative_scores, token_index, padding_mask=None,
-                 layer_num=None, deterministic=False):
+                 layer_num=None, deterministic=False, T=None):
         # Fork first
-        x, cumulative_scores, token_index = self.fork(x, cumulative_scores, token_index, padding_mask)
+        x, cumulative_scores, token_index = self.fork(x, cumulative_scores, token_index, padding_mask, T=t)
 
         return super().__call__(
             x,
@@ -473,7 +478,8 @@ class Thoughtbubbles(nn.Module):
                 x, cumulative_scores, token_index,
                 padding_mask=padding_mask,
                 layer_num=indx,
-                deterministic=deterministic
+                deterministic=deterministic,
+                T=t
             )
 
 
