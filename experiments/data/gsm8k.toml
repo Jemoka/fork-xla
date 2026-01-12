@@ -1,0 +1,7 @@
+# calculations assumes training at 400M (400000000) tokens
+# constant LR
+
+[[dataset]]
+type = "padded"
+path = "/sphinx/u/houjun/dataset/gsm8k_aug"
+weight = 1.0 # 2 epochs

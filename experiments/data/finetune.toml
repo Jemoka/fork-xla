@@ -1,0 +1,9 @@
+# calculations assumes training at 1B (1000000000) tokens
+# constant LR
+
+[[dataset]]
+type = "padded"
+path = "/sphinx/u/houjun/dataset/smoltalk"
+weight = 1.0 # 2 epochs
+
+
