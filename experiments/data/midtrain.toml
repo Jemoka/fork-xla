@@ -3,7 +3,7 @@
 
 [[dataset]]
 type = "memmap"
-path = "/sphinx/u/houjun/dataset/pes2o_large"
+path = "/sphinx/u/houjun/dataset/pes2o/"
 weight = 0.125 # 250M used/42B tokens
 has_val = false
 
