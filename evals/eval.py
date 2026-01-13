@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod, abstractproperty
+from tiktoken import get_encoding
 
 class Evaluation(ABC):
 
@@ -50,7 +51,7 @@ class Evaluation(ABC):
         ...
 
     @abstractmethod
-    def get(self, indx) -> str:
+    def get(self, indx) -> (str, str):
         ...
 
     @abstractmethod
@@ -62,6 +63,9 @@ class Evaluator:
         self.evaluations = evaluations
 
     def __call__(self, encoding, rollout_fn, batch_size: int = 4, logger=None):
+        if isinstance(encoding, str):
+            encoding = get_encoding(encoding)
+
         results = {}
 
         for evaluation in self.evaluations:
