@@ -62,7 +62,15 @@ class Evaluator:
     def __init__(self, evaluations: list[Evaluation]):
         self.evaluations = evaluations
 
-    def __call__(self, encoding, rollout_fn, batch_size: int = 4, logger=None):
+    def __call__(self, encoding, rollout_fn, batch_size: int = 4, logger=None, debug__truncate=None):
+        """Run evaluations
+
+        Args:
+            encoding: tiktoken encoding or str name of encoding
+            rollout_fn: function that takes in list of tokenized prompts and returns list of tokenized predictions
+            batch_size (int, optional): batch size for processing. Defaults to 4.
+            logger (_type_, optional): logger function. Defaults to None.
+        """
         if isinstance(encoding, str):
             encoding = get_encoding(encoding)
 
@@ -90,6 +98,8 @@ class Evaluator:
             all_predictions = []
             num_batches = (len(prompts) + batch_size - 1) // batch_size
             for i in range(0, len(prompts), batch_size):
+                if i > 0 and debug__truncate is not None and i >= debug__truncate:
+                    break
                 batch_prompts = prompts[i:i+batch_size]
                 if logger:
                     logger(f"EVAL | Processing batch {i//batch_size + 1}/{num_batches}")

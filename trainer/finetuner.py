@@ -37,6 +37,7 @@ from loguru import logger
 # our stuff
 from model import *
 from utils import plot_logger, parse_dataset_spec
+from evals import Evaluator, GSM8k
 
 from jax.experimental import multihost_utils
 
@@ -81,6 +82,15 @@ class Finetuner:
         self.local_replicas = local // args.shard_into
         assert self.replicas == self.mesh.shape["batch"]
         assert self.local_replicas * jax.process_count() == self.replicas
+
+        # build an evaluator
+        evals = []
+        for i in args.evals:
+            if i.lower() == "gsm8k":
+                evals.append(GSM8k())
+            else:
+                raise ValueError(f"Unknown eval {i}")
+        self.evaluator = Evaluator(evals)
 
         # compute how much to accumulate
         self.per_device_batch_size, self.accumulate_steps = self.find_accumulation_steps(
@@ -370,70 +380,6 @@ class Finetuner:
             out_shardings=(self.state_sharding, None),
         )
 
-    def make_valid_step(self):
-        x, y, padding_mask = self.batch("val", deterministic_key=32)
-
-        # reshape into (steps, per_device_bs*replicas, seq_len) and shard the middle axis
-        x = x.reshape(-1, self.per_device_batch_size*self.local_replicas, x.shape[-1])
-        y = y.reshape(-1, self.per_device_batch_size*self.local_replicas, y.shape[-1])
-        padding_mask = padding_mask.reshape(-1, self.per_device_batch_size*self.local_replicas, padding_mask.shape[-1])
-
-        x = multihost_utils.host_local_array_to_global_array(
-            x, self.mesh, self.data_pspec
-        )
-        y = multihost_utils.host_local_array_to_global_array(
-            y, self.mesh, self.data_pspec
-        )
-        padding_mask = multihost_utils.host_local_array_to_global_array(
-            padding_mask, self.mesh, self.data_pspec
-        )
-
-        # because batch is fixed we should be jitting the inner function
-
-        def valid_step_inner(state, batch):
-            x, y, padding_mask = batch  # x: (S, B_local, T)
-
-            def reduce(carry, xb):
-                loss_sum, count = carry
-                x_i, y_i, mask_i = xb  # (B_local, T)
-
-                _, loss_i = state.apply_fn({'params': state.params}, x_i, y_i, padding_mask=mask_i, deterministic=True)
-                n = x_i.shape[0] * x_i.shape[1]
-                return (loss_sum + loss_i * n, count + n), None
-
-            (loss_sum, count), _ = jax.lax.scan(reduce, (0.0, 0), (x, y, padding_mask))
-
-            return loss_sum, count
-
-        valid_step_inner_jit = jax.jit(
-            valid_step_inner,
-            in_shardings=(self.state_sharding, self.data_sharding),
-            out_shardings=(None, None),
-        )
-
-
-        def valid_step_wrapper(state):
-            loss_sum, count = valid_step_inner_jit(state, (x, y, padding_mask))
-            loss_sum = jax.device_get(loss_sum)
-            count    = jax.device_get(count)
-
-            # if these come back as per-device arrays, reduce them here
-            loss_sum_local = float(jnp.sum(loss_sum))
-            count_local    = float(jnp.sum(count))
-
-            loss_sum_g = multihost_utils.process_allgather(jnp.asarray(loss_sum_local))
-            count_g    = multihost_utils.process_allgather(jnp.asarray(count_local))
-
-            loss = float(jnp.sum(loss_sum_g) / jnp.sum(count_g))
-
-            score = 1/loss
-            metrics = {"val/loss": loss, "val/score": score}
-
-            return score, metrics
-
-        return valid_step_wrapper
-
-
     @staticmethod
     def _autoregress(state, key, input, input_mask, num_tokens, temperature, top_p):
 
@@ -512,7 +458,7 @@ class Finetuner:
         (final_inputs, final_masks, _), _ = jax.lax.scan(reduce, (inp_buf, mask_buf, key), seq)
         return final_inputs  # contains prompt + generated ids
 
-    def generate(self, prompts, num_tokens=128, temperature=1.0, top_p=0.9):
+    def generate(self, prompts, num_tokens=128, temperature=1.0, top_p=0.9, pad_to=None):
         if self.__autoregress_jit is None:
             self.__autoregress_jit = jax.jit(
                 self._autoregress,
@@ -526,7 +472,7 @@ class Finetuner:
                 static_argnames=("num_tokens", "temperature", "top_p"),
             )
 
-        input, input_mask = self.pad(prompts, pad_token=0)
+        input, input_mask = self.pad(prompts, pad_token=0, pad_to=pad_to)
         self.key, key = jax.random.split(self.key)
 
         output = self.__autoregress_jit(
@@ -536,8 +482,10 @@ class Finetuner:
         return jax.device_get(output)
 
     @staticmethod
-    def pad(seqs, pad_token=0):
+    def pad(seqs, pad_token=0, pad_to=None):
         max_len = max(len(s) for s in seqs)
+        if pad_to is not None:
+            max_len = max(pad_to, max_len)
         padded_seqs = [([pad_token] * (max_len - len(s)))+s for s in seqs]
         padded_masks = [([False] * (max_len - len(s)))+[True for _ in s] for s in seqs]
         return jnp.array(padded_seqs), jnp.array(padded_masks)
@@ -551,7 +499,6 @@ class Finetuner:
 
         # JIT compile + shard train step across workers 
         train_step = self.make_train_step()
-        valid_step = self.make_valid_step()
 
         grads_accum = None
 
@@ -653,7 +600,7 @@ class Finetuner:
                     indx % self.accumulate_steps == 0 and
                     (indx // self.accumulate_steps)
                     % self.args.checkpoint_interval
-                    == (self.args.checkpoint_interval) # offset checkpoint to not crash with val
+                    == 0 # offset checkpoint to not crash with val
             ):
                 self.save(str(self.save_dir / str(indx // self.accumulate_steps)))
 
@@ -665,11 +612,25 @@ class Finetuner:
                     % self.args.validation_interval
                     == (self.args.validation_interval//2) # so we don't ovelap with checkpoint
             ):
-                score, val_metrics = valid_step(self.state)
+                val_metrics = self.evaluator(
+                    "gpt2",
+                    lambda x: self.generate(
+                        x,
+                        num_tokens=64,
+                        temperature=0.0,
+                        pad_to=512
+                    ),
+                    logger=lambda x:logger.info(x),
+                    batch_size=self.per_device_batch_size
+                )
+                scores = val_metrics.values()
+                score = sum(scores) / len(scores)
                 val_metrics["train/tokens"] = (
                     (((indx+1) // self.accumulate_steps)*
-                     self.args.batch_size*self.args.block_size)
+                    self.args.batch_size*self.args.block_size)
                 )
+
+
                 if self.main_process():
                     wandb.log(
                         val_metrics,

@@ -53,6 +53,7 @@ parser.add_argument("--no_bias", help="do not use bias in linear layers", dest="
 # Forking token construction arguments
 parser.add_argument("--max_block_size", help="context length, after expansion", type=int, default=2048) # thought budget = max_block_size - block_size
 parser.add_argument('--plan', nargs='+', help='layer plan; a number of \'fork\'/\'regular\'')
+parser.add_argument('--evals', nargs='+', help='finetuning evals to use')
 parser.add_argument("--merge_killed_tokens", default=False, action="store_true", help="merge killed tokens to the rightmost token")
 parser.add_argument("--averaging_method", type=str, choices=["residual", "logit", "rightmost"], default="residual", help="method for averaging forked tokens")
 

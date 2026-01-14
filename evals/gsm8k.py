@@ -19,15 +19,21 @@ class GSM8k(Evaluation):
 
     def clean(self, y_hat: str) -> str:
         clean = y_hat.split("####")[-1].strip().split("answer:")[-1].strip()
+        # truncate answer at <|endoftext|>
+        if "<|endoftext|>" in clean:
+            clean = clean.split("<|endoftext|>")[0].strip()
         # only keep numerical component / decimal point
         clean = "".join([c for c in clean if c in "0123456789.-"]).strip()
 
         return clean
 
     def check(self, y: str, y_hat: str) -> bool:
-        if float(y.strip()) == float(y_hat.strip()):
-            return True
-        return False
+        try:
+            if float(y.strip()) == float(y_hat.strip()):
+                return True
+            return False
+        except:
+            return False
 
 
 
