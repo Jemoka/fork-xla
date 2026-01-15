@@ -52,6 +52,24 @@ trainer = Finetuner.from_pretrained(
     args
 )
 
+val_metrics = trainer.evaluator(
+    "gpt2",
+    lambda x: trainer.generate(
+        x,
+        num_tokens=64,
+        temperature=0.0,
+        pad_to=256
+    ),
+    logger=lambda x:logger.info(x),
+    batch_size=trainer.per_device_batch_size
+)
+scores = val_metrics.values()
+score = sum(scores) / len(scores)
+indx = 8
+val_metrics["train/tokens"] = (
+    (((indx+1) // trainer.accumulate_steps)*
+     trainer.args.batch_size*trainer.args.block_size)
+)
 
 from evals.gsm8k import GSM8k
 from evals.eval import Evaluator
