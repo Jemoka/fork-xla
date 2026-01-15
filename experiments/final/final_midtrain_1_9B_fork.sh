@@ -44,7 +44,7 @@ srun --export=ALL bash -lc '
       main.py \
       test_68267_midtrain_fork \
       --warm_start /sphinx/u/houjun/checkpoints/fork/midtrain/test_68267_midtrain_fork/recovery \
-      --midtrain /sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_fork/chicken \
+      --midtrain /sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_fork/checkpoint/68267 \
       --data_file /juice2/scr2/houjun/fork-xla/experiments/data/midtrain.toml \
       --flops_promised 989e12 \
       --out_dir /sphinx/u/houjun/checkpoints/fork/jax/midtrain \
