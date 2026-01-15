@@ -476,7 +476,13 @@ class Finetuner:
         self.key, key = jax.random.split(self.key)
 
         output = self.__autoregress_jit(
-            self.state, key, input, input_mask, num_tokens, float(temperature), top_p
+            self.state,
+            key,
+            input,
+            input_mask,
+            num_tokens,
+            float(temperature),
+            top_p
         )
 
         return jax.device_get(output)
@@ -618,7 +624,7 @@ class Finetuner:
                         x,
                         num_tokens=64,
                         temperature=0.0,
-                        pad_to=512
+                        pad_to=(self.args.block_size-65)
                     ),
                     logger=lambda x:logger.info(x),
                     batch_size=self.per_device_batch_size
