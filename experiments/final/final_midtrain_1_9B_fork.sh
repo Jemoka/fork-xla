@@ -42,9 +42,9 @@ srun --export=ALL bash -lc '
     source .venv/bin/activate && \
     uv run python \
       main.py \
-      test_20480_midtrain_fork \
-      --warm_start /sphinx/u/houjun/checkpoints/fork/midtrain/test_20480_midtrain_fork/recovery \
-      --midtrain /sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_fork/checkpoint/20480 \
+      test_68267_midtrain_fork \
+      --warm_start /sphinx/u/houjun/checkpoints/fork/midtrain/test_68267_midtrain_fork/recovery \
+      --midtrain /sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_fork/chicken \
       --data_file /juice2/scr2/houjun/fork-xla/experiments/data/midtrain.toml \
       --flops_promised 989e12 \
       --out_dir /sphinx/u/houjun/checkpoints/fork/jax/midtrain \

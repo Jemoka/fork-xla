@@ -42,8 +42,8 @@ srun --export=ALL bash -lc '
     source .venv/bin/activate && \
     uv run python \
       main.py \
-      test_445100_midtrain_regular \
-      --warm_start /sphinx/u/houjun/checkpoints/regular/midtrain/test_445100_midtrain_regular/recovery \
+      test_111275_midtrain_regular \
+      --warm_start /sphinx/u/houjun/checkpoints/regular/midtrain/test_111275_midtrain_regular/recovery \
       --midtrain /sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_regular/best \
       --data_file /juice2/scr2/houjun/regular-xla/experiments/data/midtrain.toml \
       --flops_promised 989e12 \
