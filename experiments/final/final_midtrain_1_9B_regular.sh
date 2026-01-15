@@ -47,7 +47,7 @@ srun --export=ALL bash -lc '
       --midtrain /sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_regular/best \
       --data_file /juice2/scr2/houjun/fork-xla/experiments/data/midtrain.toml \
       --flops_promised 989e12 \
-      --out_dir /sphinx/u/houjun/checkpoints/regular/jax/midtrain \
+      --out_dir /sphinx/u/houjun/checkpoints/fork/jax/midtrain \
       --per_device_batch_size 4 \
       --validation_interval 256 \
       --checkpoint_interval 2048 \
