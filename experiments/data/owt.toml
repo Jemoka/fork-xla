@@ -1,0 +1,7 @@
+# calculations assumes training at 2B (2 000 000 000) tokens
+# WSD schedule (i.e. so we can get intermediate checkpoints)
+
+[[dataset]]
+type = "memmap"
+path = "/sphinx/u/houjun/dataset/openwebtext"
+weight = 1.0 # 0.2 epochs on OpenWebText
