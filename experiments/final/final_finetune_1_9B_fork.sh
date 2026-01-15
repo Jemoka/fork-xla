@@ -57,6 +57,7 @@ srun --export=ALL bash -lc '
       --warmup_pct 0.1 \
       --decay_pct 0.0 \
       --shard_into 1 \
+      --evals gsm8k \
       --wandb
   "
 '
