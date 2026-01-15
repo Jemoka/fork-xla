@@ -2,7 +2,7 @@
 
 #SBATCH --account=nlp
 #SBATCH --partition=sphinx
-#SBATCH --job-name=houjun-forking-final_finetune_1_9b_fork
+#SBATCH --job-name=houjun-forking-final_finetune_1_9b_regular
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --ntasks-per-node=1
@@ -11,7 +11,7 @@
 #SBATCH --time=14-0
 #SBATCH --nodelist=sphinx11,sphinx10
 #SBATCH --open-mode=append
-#SBATCH --output=./logs/final_finetune_1_9b_fork.log
+#SBATCH --output=./logs/final_finetune_1_9b_regular.log
 
 set -euo pipefail
 
@@ -42,9 +42,9 @@ srun --export=ALL bash -lc '
     source .venv/bin/activate && \
     uv run python \
       main.py \
-      test_68267_midtrain_fork \
-      --warm_start /sphinx/u/houjun/checkpoints/fork/finetune/test_68267_midtrain_fork/recovery \
-      --finetune /sphinx/u/houjun/checkpoints/fork/jax/midtrain/test_68267_midtrain_fork/chicken \
+      test_111275_midtrain_regular \
+      --warm_start /sphinx/u/houjun/checkpoints/fork/finetune/test_111275_midtrain_regular/recovery \
+      --finetune /sphinx/u/houjun/checkpoints/fork/jax/midtrain/test_111275_midtrain_regular/best \
       --data_file /juice2/scr2/houjun/fork-xla/experiments/data/gsm8k.toml \
       --flops_promised 989e12 \
       --out_dir /sphinx/u/houjun/checkpoints/fork/jax/finetune \

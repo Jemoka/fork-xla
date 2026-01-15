@@ -303,6 +303,7 @@ class Finetuner:
                     logger.error(f"TRAIN | FAILURE | Encountered exception {str(e)}; CHECKPOINT FAILED with '{str(es)}', but eh, so we're blowing up anyways...")
                 raise e
             raise e
+        self.save(str(self.save_dir / "final"))
         self.finish()
 
     def finish(self):
