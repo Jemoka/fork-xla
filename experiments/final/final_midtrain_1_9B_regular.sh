@@ -43,7 +43,7 @@ srun --export=ALL bash -lc '
     uv run python \
       main.py \
       test_111275_midtrain_regular \
-      --warm_start /sphinx/u/houjun/checkpoints/regular/midtrain/test_111275_midtrain_regular/recovery \
+      --warm_start /sphinx/u/houjun/checkpoints/fork/jax/midtrain/test_111275_midtrain_regular/best \
       --midtrain /sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_regular/best \
       --data_file /juice2/scr2/houjun/fork-xla/experiments/data/midtrain.toml \
       --flops_promised 989e12 \
