@@ -653,10 +653,13 @@ class Midtrainer:
         logger.debug("CHECKPOINT | loading checkpoint from {}", path)
 
         # Load random state
-        rng_state = np.load(os.path.join(path, "rng.npy"), allow_pickle=True).item()
-        random.setstate(rng_state["python_random"])
-        np.random.set_state(rng_state["numpy_random"])
-        self.key = jax_random.PRNGKey(rng_state["jax_random"])
+        try:
+            rng_state = np.load(os.path.join(path, "rng.npy"), allow_pickle=True).item()
+            random.setstate(rng_state["python_random"])
+            np.random.set_state(rng_state["numpy_random"])
+            self.key = jax_random.PRNGKey(rng_state["jax_random"])
+        except EOFError:
+            self.key = jax_random.PRNGKey(0)
 
         # Load checkpoint using Orbax
         checkpointer = ocp.StandardCheckpointer()
