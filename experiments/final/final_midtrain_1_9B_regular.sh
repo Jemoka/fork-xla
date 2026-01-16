@@ -36,8 +36,6 @@ srun --export=ALL bash -lc '
 
   echo "Hello from $(hostname): NCCL_IFACE=$NCCL_SOCKET_IFNAME LOCAL_RANK=$LOCAL_RANK"
 
-  uv python install 3.11 --force
-
   ./experiments/scripts/develop "
     source .venv/bin/activate && \
     uv run python \
