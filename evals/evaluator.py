@@ -1,6 +1,6 @@
 import jax
 from tiktoken import get_encoding
-from evals.evaluations import PerplexityEvaluation, RolloutEvaluation
+from evals.evaluations import PerplexityEvaluation, RolloutEvaluation, Evaluation
 from loguru import logger
 
 class Evaluator:
