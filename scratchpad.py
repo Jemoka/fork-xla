@@ -25,7 +25,9 @@ import json
 from argparse import Namespace
 
 # !nvidia-smi
-# !git fetch && git checkout 2105fdc37aca243b5de80cbf8b498be3956a08d1
+# !git fetch && git checkout 09e5b95af752535a436094885015bddaa5ebbf48
+ # bf2005b9edc8394b7af00282ad95cd40dd00f64d
+# 2105fdc37aca243b5de80cbf8b498be3956a08d1
 #998d1b83fb398bc9b4e762721284d76d050b2de4
 # 506114370c82e1eb497051ea759b1e284e723722
 # 33a608457c7f95d23fa8aa9f8125067b80486c23
@@ -52,6 +54,11 @@ trainer = Finetuner.from_pretrained(
     "/sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_fork/best",
     args
 )
+
+from evals import Evaluator
+
+evals = Evaluator([GSM8k(), Blimp()])
+result = evals("gpt2", trainer, True)
 
 val_metrics = trainer.evaluator(
     "gpt2",

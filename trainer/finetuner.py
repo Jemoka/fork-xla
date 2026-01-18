@@ -637,17 +637,7 @@ class Finetuner:
                     % self.args.validation_interval
                     == (self.args.validation_interval//2) # so we don't ovelap with checkpoint
             ):
-                val_metrics = self.evaluator(
-                    "gpt2",
-                    lambda x: self.generate(
-                        x,
-                        num_tokens=64,
-                        temperature=0.0,
-                        pad_to=(self.args.block_size-65)
-                    ),
-                    logger=lambda x:logger.info(x),
-                    batch_size=self.per_device_batch_size
-                )
+                val_metrics = self.evaluator("gpt2", self, truncate=True)
                 scores = val_metrics.values()
                 score = sum(scores) / len(scores)
                 val_metrics["train/tokens"] = (

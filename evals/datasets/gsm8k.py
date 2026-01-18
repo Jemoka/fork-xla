@@ -6,6 +6,7 @@ class GSM8k(RolloutEvaluation):
     def __init__(self, split="test"):
         self.ds = load_dataset("openai/gsm8k", "main")[split]
 
+    @property
     def num_tokens(self):
         return 128
 
