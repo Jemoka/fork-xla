@@ -1,4 +1,4 @@
-from evals.prototypes import PerplexityEvaluation
+from evals.evaluations import PerplexityEvaluation
 
 import random
 import datasets
@@ -12,6 +12,7 @@ class Blimp(PerplexityEvaluation):
             configs = get_dataset_config_names("nyu-mll/blimp")
             all = [load_dataset("nyu-mll/blimp", subset)  for subset in configs]
             self.ds = datasets.combine.concatenate_datasets([i["train"] for i in all])
+        self.R = random.Random(7)
 
     @property
     def name(self) -> str:
@@ -23,7 +24,7 @@ class Blimp(PerplexityEvaluation):
     def get(self, indx) -> (str, list[str], int):
         """return (x,y)"""
 
-        rev = random.choice([True, False])
+        rev = self.R.choice([True, False])
         sample = self.ds[indx]
         continuations = [sample["sentence_good"], sample["sentence_bad"]]
 
@@ -32,7 +33,3 @@ class Blimp(PerplexityEvaluation):
         else:
             return ("", list(continuations), 0)
         
-        
-
-
-

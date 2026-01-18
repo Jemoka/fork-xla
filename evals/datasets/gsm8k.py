@@ -1,4 +1,4 @@
-from evals.prototypes import RolloutEvaluation
+from evals.evaluations import RolloutEvaluation
 from datasets import load_dataset
 
 class GSM8k(RolloutEvaluation):

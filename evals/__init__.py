@@ -1,2 +1,2 @@
-from .gsm8k import GSM8k
+from .datasets import *
 from .evaluator import Evaluator
