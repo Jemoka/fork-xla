@@ -40,7 +40,8 @@ args = configure(
     flops_promised=275e12,
     report_interval=1,
     shard_into=1,
-    data_file="/juice2/scr2/houjun/fork-xla/experiments/data/gsm8k.toml"
+    data_file="/juice2/scr2/houjun/fork-xla/experiments/data/gsm8k.toml",
+    evals=["gsm8k"]
 )
 
 # 1+1

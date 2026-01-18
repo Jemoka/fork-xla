@@ -1,10 +1,13 @@
-from evals.eval import Evaluation
+from evals.evaluations import RolloutEvaluation
 from datasets import load_dataset
 
-class GSM8k(Evaluation):
+class GSM8k(RolloutEvaluation):
 
     def __init__(self, split="test"):
         self.ds = load_dataset("openai/gsm8k", "main")[split]
+
+    def num_tokens(self):
+        return 128
 
     @property
     def name(self) -> str:
