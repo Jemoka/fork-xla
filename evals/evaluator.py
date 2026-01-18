@@ -1,68 +1,14 @@
-from abc import ABC, abstractmethod, abstractproperty
+import jax
 from tiktoken import get_encoding
-
-class Evaluation(ABC):
-
-    @abstractproperty
-    def name(self) -> str:
-        ...
-
-    def prefix(self) -> str:
-        return self.name+"_"
-
-    def score(self, ys: str, y_hats: str) -> float:
-        """From generated results, compute score
-
-        Args:
-            ys (str): ground truth
-            y_hats (str): generated results
-        Returns:
-            float: computed score, higher is better
-        """
-
-        results = [
-            self.check(i,j)
-            for i, j in zip(ys, y_hats)
-        ]
-        return sum(results) / len(results)
-
-    def check(self, y: str, y_hat: str) -> bool:
-        """Check if y_hat matches y
-
-        Args:
-            y (str): ground truth
-            y_hat (str): generated result
-        Returns:
-            bool: whether y_hat matches y
-        """
-
-        raise NotImplementedError("Please override this method or self.score, not neither!")
-
-    @abstractmethod
-    def clean(self, y_hat: str) -> str:
-        """Clean generated result before checking
-
-        Args:
-            y_hat (str): generated result, which *can include* the prompt
-        Returns:
-            str: cleaned/normalized result available for comparison
-        """
-
-        ...
-
-    @abstractmethod
-    def get(self, indx) -> (str, str):
-        ...
-
-    @abstractmethod
-    def __len__(self) -> int:
-        ...
+from evals.prototypes import PerplexityEvaluation, RolloutEvaluation
+from loguru import logger
 
 class Evaluator:
+
     def __init__(self, evaluations: list[Evaluation]):
         self.evaluations = evaluations
 
-    def __call__(self, encoding, rollout_fn, batch_size: int = 4, logger=None, debug__truncate=None):
+    def __call__(self, encoding, trainer):
         """Run evaluations
 
         Args:
@@ -71,14 +17,14 @@ class Evaluator:
             batch_size (int, optional): batch size for processing. Defaults to 4.
             logger (_type_, optional): logger function. Defaults to None.
         """
+
         if isinstance(encoding, str):
             encoding = get_encoding(encoding)
 
         results = {}
 
         for evaluation in self.evaluations:
-            if logger:
-                logger(f"EVAL | Running evaluation: {evaluation.name}")
+            logger.info(f"EVAL | Running evaluation: {evaluation.name}")
 
             # Collect all prompts and ground truths
             prompts = []
@@ -101,8 +47,7 @@ class Evaluator:
                 if i > 0 and debug__truncate is not None and i >= debug__truncate:
                     break
                 batch_prompts = prompts[i:i+batch_size]
-                if logger:
-                    logger(f"EVAL | Processing batch {i//batch_size + 1}/{num_batches}")
+                logger.debug(f"EVAL | Processing batch {i//batch_size + 1}/{num_batches}")
 
                 # Encode prompts to tokens
                 encoded_prompts = encoding.encode_batch(batch_prompts)
@@ -120,8 +65,7 @@ class Evaluator:
             # Score
             score = evaluation.score(ground_truths, cleaned_predictions)
 
-            if logger:
-                logger(f"EVAL | {evaluation.name} score: {score:.4f}")
+            logger.info(f"EVAL | {evaluation.name} score: {score:.4f}")
 
             results[f"{evaluation.prefix()}score"] = score
 
