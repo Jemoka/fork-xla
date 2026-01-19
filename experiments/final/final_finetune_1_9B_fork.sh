@@ -40,8 +40,8 @@ srun --export=ALL bash -lc '
     source .venv/bin/activate && \
     uv run python \
       main.py \
-      test_68267_midtrain_fork_var \
-      --warm_start /sphinx/u/houjun/checkpoints/fork/finetune/test_68267_midtrain_fork_var/recovery \
+      test_68267_finetune_fork \
+      --warm_start /sphinx/u/houjun/checkpoints/fork/finetune/test_68267_finetune_fork/recovery \
       --finetune /sphinx/u/houjun/checkpoints/fork/jax/midtrain/test_68267_midtrain_fork/best \
       --data_file /juice2/scr2/houjun/fork-xla/experiments/data/gsm8k.toml \
       --flops_promised 989e12 \
