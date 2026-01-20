@@ -7,10 +7,6 @@ class GSM8k(RolloutEvaluation):
         self.ds = load_dataset("openai/gsm8k", "main")[split]
 
     @property
-    def num_tokens(self):
-        return 128
-
-    @property
     def name(self) -> str:
         return "gsm8k"
 

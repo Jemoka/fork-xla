@@ -81,11 +81,6 @@ class RolloutEvaluation(Evaluation):
         """return (x,y)"""
         ...
 
-    @abstractproperty
-    def num_tokens(self) -> int:
-        """maximum rollout length BEYOND prompt"""
-        ...
-
     def __call__(self, trainer, encoding, truncate=False, temperature=0.0, top_p=1.0, **kwargs):
         eval = self
 
@@ -140,7 +135,7 @@ class RolloutEvaluation(Evaluation):
 
         def evaluate(state, xs, masks, key):
             def reduce(_, batch):
-                results = trainer._autoregress(state, key, batch[0], batch[1], self.num_tokens, temperature, top_p, **kwargs)
+                results = trainer._autoregress(state, key, batch[0], batch[1], trainer.args.block_size, temperature, top_p, **kwargs)
                 return None, results
 
             _, rollouts = jax.lax.scan(

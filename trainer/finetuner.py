@@ -431,11 +431,10 @@ class Finetuner:
             return jnp.where(keep, logits, neg_inf)
 
 
-
-        seq = jnp.arange(num_tokens)
-
         B, T_in = input.shape
-        T_total = T_in + num_tokens
+        T_total = num_tokens
+
+        seq = jnp.arange(num_tokens-T_in)
 
         inp_buf = jnp.zeros((B, T_total), dtype=jnp.int32)
         mask_buf = jnp.zeros((B, T_total), dtype=jnp.bool_)
@@ -477,7 +476,7 @@ class Finetuner:
         (final_inputs, final_masks, _), _ = jax.lax.scan(reduce, (inp_buf, mask_buf, key), seq)
         return final_inputs  # contains prompt + generated ids
 
-    def generate(self, prompts, num_tokens=128, temperature=1.0, top_p=0.9, pad_to=None):
+    def generate(self, prompts, temperature=1.0, top_p=0.9, pad_to=None):
         if self.__autoregress_jit is None:
             self.__autoregress_jit = jax.jit(
                 self._autoregress,
@@ -499,7 +498,7 @@ class Finetuner:
             key,
             input,
             input_mask,
-            num_tokens,
+            self.args.block_size,
             float(temperature),
             top_p
         )

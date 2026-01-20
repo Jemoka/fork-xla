@@ -321,6 +321,7 @@ class Midtrainer:
                 x = np.pad(x, ((0, 0), (0, pad_width)), mode='constant', constant_values=0)
                 y = np.pad(y, ((0, 0), (0, pad_width)), mode='constant', constant_values=0)
                 padding_mask = np.pad(padding_mask, ((0, 0), (0, pad_width)), mode='constant', constant_values=False)
+
         else:
             # we will load a number of samples divisble by per_device_batch_size
             # so that we can reshape it so + enable batched loads
