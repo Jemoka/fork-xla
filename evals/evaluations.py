@@ -179,6 +179,155 @@ class RolloutEvaluation(Evaluation):
 
         return score
 
+class EncodingEvaluation(Evaluation):
+
+    def score(self, xs: list[str], y_hats: list[str]) -> float:
+        """From input and model predictions, compute score
+
+        Args:
+            xs (list[str]): input strings
+            y_hats (list[str]): model predictions (argmax of logits, shifted by 1)
+        Returns:
+            float: computed score, higher is better
+        """
+        results = [
+            self.check(x, y_hat)
+            for x, y_hat in zip(xs, y_hats)
+        ]
+        return sum(results) / len(results)
+
+    def check(self, x: str, y_hat: str) -> bool:
+        """Check if prediction is correct given input
+
+        Args:
+            x (str): input string
+            y_hat (str): model prediction (cleaned, decoded argmax)
+        Returns:
+            bool: whether prediction is correct
+        """
+        raise NotImplementedError("Please override this method or self.score!")
+
+    @abstractmethod
+    def clean(self, y_hat: str) -> str:
+        """Clean model prediction before checking
+
+        Args:
+            y_hat (str): raw decoded model prediction
+        Returns:
+            str: cleaned/normalized result available for comparison
+        """
+        ...
+
+    @abstractmethod
+    def get(self, indx) -> str:
+        """return input string x"""
+        ...
+
+    def __call__(self, trainer, encoding, truncate=False):
+        eval = self
+
+        # encoding everything
+        multihost_utils.sync_global_devices("eval_gather_all:pre")
+        if jax.process_index() == 0:
+            x = [eval.get(i) for i in range(len(eval))]
+            xs, masks = trainer.pad(encoding.encode_batch(x))
+        else:
+            x = None
+            xs, masks = None, None
+        xs = multihost_utils.broadcast_one_to_all(xs)
+        masks = multihost_utils.broadcast_one_to_all(masks)
+        multihost_utils.sync_global_devices("eval_gather_all:post")
+
+        # divide into pieces such that each host gets a batch with
+        if not truncate:
+            per_device_batch_size, accumulate_steps = self.find_accumulation_steps(
+                xs.shape[0],
+                trainer.per_device_batch_size,
+                trainer.replicas
+            )
+            if per_device_batch_size is None:
+                # Truncate if we can't find a good batch size
+                truncate = True
+
+        if truncate:
+            xs = xs[:(xs.shape[0]//(trainer.replicas*trainer.per_device_batch_size))*
+                    (trainer.replicas*trainer.per_device_batch_size)]
+            masks = masks[:(xs.shape[0]//(trainer.replicas*trainer.per_device_batch_size))*
+                          (trainer.replicas*trainer.per_device_batch_size)]
+
+        # divide into pieces
+        pieces_xs = jnp.array_split(xs, jax.process_count(), axis=0)
+        pieces_masks = jnp.array_split(masks, jax.process_count(), axis=0)
+        xs = pieces_xs[jax.process_index()]
+        masks = pieces_masks[jax.process_index()]
+
+        # reshape into (accumulate_steps, per_device_batch_size, T)
+        xs = xs.reshape(-1, trainer.local_replicas*trainer.per_device_batch_size, xs.shape[-1])
+        masks = masks.reshape(-1, trainer.local_replicas*trainer.per_device_batch_size, xs.shape[-1])
+
+        # and finally make fake tensor across hosts
+        xs = multihost_utils.host_local_array_to_global_array(
+            xs, trainer.mesh, trainer.data_pspec
+        )
+        masks = multihost_utils.host_local_array_to_global_array(
+            masks, trainer.mesh, trainer.data_pspec
+        )
+
+        def evaluate(state, xs, masks):
+            def reduce(_, batch):
+                x_batch, mask_batch = batch
+                # Single forward pass through the model
+                logits, _ = state.apply_fn(
+                    {'params': state.params},
+                    x_batch,
+                    padding_mask=mask_batch,
+                    deterministic=True
+                )
+                # Take argmax to get predicted tokens, exclude last position
+                # (logits at position i predict token i+1)
+                predictions = jnp.argmax(logits[:, :-1, :], axis=-1)
+                return None, predictions
+
+            _, results = jax.lax.scan(
+                reduce,
+                None,
+                (xs, masks)
+            )
+
+            # concatenate results across batches
+            results = jnp.reshape(results, (-1, results.shape[-1]))
+            return results
+
+        # jit!
+        wrapped_evaluate = jax.jit(
+            evaluate,
+            in_shardings=(
+                trainer.state_sharding,
+                trainer.data_sharding,
+                trainer.data_sharding,
+            ),
+            out_shardings=None
+        )
+
+        results = wrapped_evaluate(trainer.state, xs, masks)
+
+        # collect across hosts
+        multihost_utils.sync_global_devices("eval_gather_all:pre")
+        results = multihost_utils.process_allgather(results)
+        multihost_utils.sync_global_devices("eval_gather_all:post")
+
+        # flatten
+        results = jnp.reshape(results, (-1, results.shape[-1]))
+
+        # decode predictions
+        decoded_outputs = encoding.decode_batch(results.tolist())
+
+        # score
+        score = eval.score(x, [eval.clean(i) for i in decoded_outputs])
+
+        return score
+
+
 class PerplexityEvaluation(Evaluation):
 
     @abstractmethod

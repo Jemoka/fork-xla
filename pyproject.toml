@@ -5,7 +5,7 @@ description = "Forking transformer language models on TPU/XLA with JAX"
 requires-python = ">=3.11"
 dependencies = [
     "setuptools",
-    "datasets>=3.1.0",
+    "datasets>=3.1.0,<=3.6.0",
     "ipdb>=0.13.13",
     "loguru>=0.7.3",
     "nltk>=3.9.1",
