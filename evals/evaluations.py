@@ -505,19 +505,40 @@ class PerplexityEvaluation(Evaluation):
 
         # Convert to numpy for easier processing
         losses = jax.device_get(losses)
+        metadata_gathered = jax.device_get(metadata_gathered)
         correct_indices_array = jax.device_get(correct_indices_array)
 
-        # Reshape losses into (num_samples, num_continuations_per_sample)
-        num_samples = len(correct_indices_array)
-        num_continuations = len(losses) // num_samples
-        losses_reshaped = losses.reshape(num_samples, num_continuations)
+        # Group losses by sample_idx using metadata
+        # This handles: (1) variable continuations per sample, (2) truncation removing partial samples
+        from collections import defaultdict
+        sample_losses = defaultdict(list)
+        sample_num_continuations = {}
 
-        # Find continuation with minimum loss for each sample
-        predictions = jnp.argmin(losses_reshaped, axis=1)
+        for i, (sample_idx, cont_idx, num_conts) in enumerate(metadata_gathered):
+            sample_idx = int(sample_idx)
+            sample_losses[sample_idx].append(losses[i])
+            sample_num_continuations[sample_idx] = int(num_conts)
 
-        # Compute accuracy
-        accuracy = jnp.mean(predictions == correct_indices_array)
+        # Only evaluate samples that have all their continuations (complete samples)
+        correct = 0
+        total = 0
 
+        for sample_idx in sorted(sample_losses.keys()):
+            expected_conts = sample_num_continuations[sample_idx]
+            actual_conts = len(sample_losses[sample_idx])
+
+            # Skip incomplete samples (truncated)
+            if actual_conts != expected_conts:
+                continue
+
+            losses_for_sample = jnp.array(sample_losses[sample_idx])
+            pred = int(jnp.argmin(losses_for_sample))
+            correct_idx = int(correct_indices_array[sample_idx])
+
+            correct += int(pred == correct_idx)
+            total += 1
+
+        accuracy = correct / total if total > 0 else 0.0
         return float(accuracy)
 
 
