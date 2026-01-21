@@ -12,6 +12,7 @@ import json
 import jax
 
 from loguru import logger
+from commands import configure
 
 from trainer.finetuner import Finetuner, AVAILABLE_EVALS
 from evals import (
