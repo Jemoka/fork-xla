@@ -2,16 +2,16 @@
 
 #SBATCH --account=nlp
 #SBATCH --partition=sphinx
-#SBATCH --job-name=houjun-forking-evaluate
+#SBATCH --job-name=houjun-forking-eval_pretrain_1_9B_regular
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --requeue
 #SBATCH --mem=128G
 #SBATCH --time=14-0
-#SBATCH --nodelist=sphinx11,sphinx10
+#SBATCH --nodelist=sphinx3,sphinx4,sphinx5,sphinx6,sphinx7,sphinx8,sphinx9,sphinx10,sphinx11
 #SBATCH --open-mode=append
-#SBATCH --output=./logs/evaluate.log
+#SBATCH --output=./logs/eval_pretrain_1_9B_regular.log
 
 set -euo pipefail
 
@@ -24,13 +24,13 @@ WORLD_SIZE="$SLURM_NTASKS"
 export MASTER_ADDR MASTER_PORT WORLD_SIZE
 
 # Default checkpoint path - override with environment variable CHECKPOINT_PATH
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/sphinx/u/houjun/checkpoints/fork/jax/finetune/test_68267_finetune_fork/best}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/sphinx/u/houjun/checkpoints/fork/jax/pretrain/final_pretrain_1_9b_regular/best}"
 
 # Optional: specify evals (space-separated), or leave empty for all
 EVALS="${EVALS:-}"
 
 # Output file for results
-OUTPUT_FILE="${OUTPUT_FILE:-./results/evaluate_results.json}"
+OUTPUT_FILE="${OUTPUT_FILE:-/juice2/scr2/houjun/fork-xla/output/eval_pretrain_1_9B_regular_results.json}"
 
 srun --export=ALL bash -lc '
   set -euo pipefail
@@ -62,6 +62,7 @@ srun --export=ALL bash -lc '
       --truncate \
       --output '"$OUTPUT_FILE"' \
       --shard-into 1 \
+      --per-device-batch-size 2 \
       $EVAL_FLAGS
   "
 '

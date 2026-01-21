@@ -37,11 +37,22 @@ from loguru import logger
 # our stuff
 from model import *
 from utils import plot_logger, parse_dataset_spec
-from evals import Evaluator, GSM8k
+from evals import *
 
 from jax.experimental import multihost_utils
 
 R = Random(7)
+
+AVAILABLE_EVALS = {
+    "blimp": Blimp,
+    "gsm8k": GSM8k,
+    "hellaswag": HellaSwag,
+    "piqa": PIQA,
+    "arc_easy": ARCEasy,
+    "arc_challenge": ARCChallenge,
+    "lambada": Lambada,
+}
+
 
 class Finetuner:
     def device_count(self):
@@ -86,8 +97,9 @@ class Finetuner:
         # build an evaluator
         evals = []
         for i in args.evals:
-            if i.lower() == "gsm8k":
-                evals.append(GSM8k())
+            ceval = AVAILABLE_EVALS.get(i.lower())
+            if ceval is not None:
+                evals.append(ceval())
             else:
                 raise ValueError(f"Unknown eval {i}")
         self.evaluator = Evaluator(evals)

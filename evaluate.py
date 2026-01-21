@@ -13,7 +13,7 @@ import jax
 
 from loguru import logger
 
-from trainer.finetuner import Finetuner
+from trainer.finetuner import Finetuner, AVAILABLE_EVALS
 from evals import (
     Evaluator,
     Blimp,
@@ -24,18 +24,6 @@ from evals import (
     ARCChallenge,
     Lambada,
 )
-
-
-AVAILABLE_EVALS = {
-    "blimp": Blimp,
-    "gsm8k": GSM8k,
-    "hellaswag": HellaSwag,
-    "piqa": PIQA,
-    "arc_easy": ARCEasy,
-    "arc_challenge": ARCChallenge,
-    "lambada": Lambada,
-}
-
 
 @click.command()
 @click.option(
@@ -72,14 +60,14 @@ AVAILABLE_EVALS = {
 @click.option(
     "--shard-into",
     type=int,
-    default=None,
-    help="Override shard_into parameter (for different GPU counts)",
+    default=1,
+    help="split model into this many splits",
 )
 @click.option(
     "--per-device-batch-size",
     type=int,
-    default=None,
-    help="Override per_device_batch_size parameter",
+    default=4,
+    help="how many sequences fit per GPU",
 )
 def main(checkpoint, evals, encoding, truncate, output, shard_into, per_device_batch_size):
     """Run evaluations on a trained model checkpoint."""
@@ -102,6 +90,14 @@ def main(checkpoint, evals, encoding, truncate, output, shard_into, per_device_b
     logger.info(f"EVAL | Process count: {jax.process_count()}")
     logger.info(f"EVAL | Process index: {jax.process_index()}")
 
+    # build arguments
+    args = configure(
+        "evaluator",
+        shard_into=shard_into,
+        per_device_batch_size=per_device_batch_size,
+        evals=eval_names
+    )
+
     # Load the trainer from checkpoint
     trainer = Finetuner.from_checkpoint(
         checkpoint,
@@ -109,27 +105,11 @@ def main(checkpoint, evals, encoding, truncate, output, shard_into, per_device_b
         distributed=jax.process_count() > 1,
     )
 
-    # Override parameters if specified
-    if shard_into is not None:
-        logger.info(f"EVAL | Overriding shard_into: {trainer.args.shard_into} -> {shard_into}")
-        trainer.args.shard_into = shard_into
-
-    if per_device_batch_size is not None:
-        logger.info(f"EVAL | Overriding per_device_batch_size: {trainer.per_device_batch_size} -> {per_device_batch_size}")
-        trainer.per_device_batch_size = per_device_batch_size
-
     logger.info(f"EVAL | Model loaded successfully")
     logger.info(f"EVAL | Running evaluations: {eval_names}")
 
-    # Build evaluation list
-    evaluations = []
-    for name in eval_names:
-        eval_cls = AVAILABLE_EVALS[name.lower()]
-        evaluations.append(eval_cls())
-        logger.info(f"EVAL | Added evaluation: {name}")
-
     # Create evaluator and run
-    evaluator = Evaluator(evaluations)
+    evaluator = trainer.evaluator
     results = evaluator(encoding, trainer, truncate=truncate)
 
     # Print results
