@@ -308,20 +308,6 @@ class Midtrainer:
                 strategy = self.async_dl_cache["train"]
 
             x, y, padding_mask = strategy.get_batch()
-            if "fork" in self.args.plan:
-                bs, T = x.shape
-                # Random crop point between 1 and T
-                crop_length = R.randint(1, T)
-                # Crop to random length
-                x = x[:, :crop_length]
-                y = y[:, :crop_length]
-                padding_mask = padding_mask[:, :crop_length]
-                # Pad back to original size T
-                pad_width = T - crop_length
-                x = np.pad(x, ((0, 0), (0, pad_width)), mode='constant', constant_values=0)
-                y = np.pad(y, ((0, 0), (0, pad_width)), mode='constant', constant_values=0)
-                padding_mask = np.pad(padding_mask, ((0, 0), (0, pad_width)), mode='constant', constant_values=False)
-
         else:
             # we will load a number of samples divisble by per_device_batch_size
             # so that we can reshape it so + enable batched loads
