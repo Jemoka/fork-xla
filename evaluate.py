@@ -100,8 +100,9 @@ def main(checkpoint, evals, encoding, truncate, output, shard_into, per_device_b
     )
 
     # Load the trainer from checkpoint
-    trainer = Finetuner.from_checkpoint(
+    trainer = Finetuner.from_pretrained(
         checkpoint,
+        args,
         disable_wandb=True,
         distributed=jax.process_count() > 1,
     )
