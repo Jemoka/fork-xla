@@ -334,24 +334,6 @@ class Finetuner:
                 strategy = self.async_dl_cache["train"]
 
             x, y, padding_mask = strategy.get_batch()
-            # x should be (bs, T), y should be (bs, T), padding_mask should be (bs, T) where True is *non padding*
-            # if "fork" is in self.plan, then crop x, y, padding_mask based on a random number between 1,T, and then
-            # pad it back to the original size T with 0s. Extend padding_mask with appropirate number of Falses
-            # such that it becomes the same shape
-            if "fork" in self.args.plan:
-                bs, T = x.shape
-                # Random crop point between 1 and T
-                crop_length = random.randint(1, T)
-                # Crop to random length
-                x = x[:, :crop_length]
-                y = y[:, :crop_length]
-                padding_mask = padding_mask[:, :crop_length]
-                # Pad back to original size T
-                pad_width = T - crop_length
-                x = np.pad(x, ((0, 0), (0, pad_width)), mode='constant', constant_values=0)
-                y = np.pad(y, ((0, 0), (0, pad_width)), mode='constant', constant_values=0)
-                padding_mask = np.pad(padding_mask, ((0, 0), (0, pad_width)), mode='constant', constant_values=False)
-
         else:
             # we will load a number of samples divisble by per_device_batch_size
             # so that we can reshape it so + enable batched loads
