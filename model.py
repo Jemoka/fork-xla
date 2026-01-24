@@ -375,6 +375,11 @@ class ForkingBlock(Block):
             rank_in_row = jnp.argsort(score_order, axis=-1) # (B,T), "rank" of each token 0 = top-1, 1 = top-2, etc.
             scores_to_kill = ~(rank_in_row < k_per_row[:, None])
             forking_scores_cum_for_topk = jnp.where(scores_to_kill, -jnp.inf, forking_scores_cum_for_topk)
+            forking_scores_cum = jnp.where(
+                scores_to_kill, # this is from the "soft" forking above
+                float("-inf"),
+                forking_scores_cum
+            )
 
         # Perform top-k selection
         if T is not None:
@@ -419,11 +424,7 @@ class ForkingBlock(Block):
                 new_cumulative_scores,
                 float("-inf")
             )
-            new_cumulative_scores = jnp.where(
-                scores_to_kill, # this is from the "soft" forking above
-                float("-inf"),
-                new_cumulative_scores
-            )
+
 
         return x_to_consider, new_cumulative_scores, new_token_indices
 
