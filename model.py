@@ -362,12 +362,12 @@ class ForkingBlock(Block):
 
         if padding_mask is not None:
             forking_scores_cum = jnp.where(
-                padding_mask,
+                jnp.repeat(padding_mask, repeats=2, axis=1),
                 forking_scores_cum,
                 float("-inf")
             )
             forking_scores_cum_for_topk = jnp.where(
-                padding_mask,
+                jnp.repeat(padding_mask, repeats=2, axis=1),
                 forking_scores_cum_for_topk,
                 float("-inf")
             )
