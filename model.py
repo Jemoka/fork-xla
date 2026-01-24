@@ -361,13 +361,19 @@ class ForkingBlock(Block):
         )
 
         if padding_mask is not None:
+            new_padding_mask = jnp.take_along_axis(
+                padding_mask,
+                forked_token_index,
+                axis=-1
+            )
+
             forking_scores_cum = jnp.where(
-                jnp.repeat(padding_mask, repeats=2, axis=1),
+                new_padding_mask,
                 forking_scores_cum,
                 float("-inf")
             )
             forking_scores_cum_for_topk = jnp.where(
-                jnp.repeat(padding_mask, repeats=2, axis=1),
+                new_padding_mask,
                 forking_scores_cum_for_topk,
                 float("-inf")
             )
