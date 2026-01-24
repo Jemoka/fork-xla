@@ -421,7 +421,7 @@ class ForkingBlock(Block):
             )
             new_cumulative_scores = jnp.where(
                 scores_to_kill, # this is from the "soft" forking above
-                float("-inf")
+                float("-inf"),
                 new_cumulative_scores
             )
 
