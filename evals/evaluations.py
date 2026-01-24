@@ -435,10 +435,18 @@ class PerplexityEvaluation(Evaluation):
                 y_batch = jnp.roll(x_batch, -1, axis=-1)
                 y_batch = y_batch.at[:, -1].set(0)  # Last position doesn't matter
 
-                # Set prefix positions to -1 so they're ignored in loss
-                seq_positions = jnp.arange(x_batch.shape[-1])[None, :]  # (1, seq_len)
-                is_prefix = seq_positions < prefix_len_batch[:, None]  # (batch, seq_len)
-                y_batch = jnp.where(is_prefix, -1, y_batch)
+                # With LEFT padding, content starts after padding:
+                # [PAD, PAD, ..., prefix_tokens..., continuation_tokens...]
+                # We need to ignore both padding AND prefix positions
+                seq_len = x_batch.shape[-1]
+                num_real_tokens = jnp.sum(mask_batch.astype(jnp.int32), axis=-1, keepdims=True)  # (batch, 1)
+                content_start = seq_len - num_real_tokens  # where actual content begins
+
+                seq_positions = jnp.arange(seq_len)[None, :]  # (1, seq_len)
+                # Ignore everything before (content_start + prefix_len), i.e., padding + prefix
+                prefix_end = content_start + prefix_len_batch[:, None]  # (batch, 1)
+                is_padding_or_prefix = seq_positions < prefix_end
+                y_batch = jnp.where(is_padding_or_prefix, -1, y_batch)
 
                 # Get logits from model (no loss)
                 logits, _ = state.apply_fn(

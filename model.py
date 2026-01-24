@@ -360,12 +360,29 @@ class ForkingBlock(Block):
             forking_scores_cum_for_topk
         )
 
+        if padding_mask is not None:
+            # if we have padding_mask, we "soft kill" elements below the top-k such
+            # that forking is always constant w.r.t. the original ratio even if we
+            # are padding
+            keep_p = self.config.max_block_size/self.config.block_size
+            # You will notice we don't "fork" the padding mask here. Since we are
+            # only computing a ratio, it doesn't really matter whether the padding mask
+            # is forked or not. The padding indicies wil be maksed out later anyways.
+            n_per_row = padding_mask.sum(axis=-1) 
+            k_per_row = jnp.floor(keep_p*n_per_row).astype(jnp.int32) 
+
+            score_order = jnp.argsort(forking_scores_cum_for_topk, axis=-1)[:, ::-1]
+            rank_in_row = jnp.argsort(score_order, axis=-1) # (B,T), "rank" of each token 0 = top-1, 1 = top-2, etc.
+            scores_to_kill = ~(rank_in_row < k_per_row[:, None])
+            forking_scores_cum_for_topk = jnp.where(scores_to_kill, -jnp.inf, forking_scores_cum_for_topk)
+
         # Perform top-k selection
         if T is not None:
             # blockwise scaling as the same ratio as train time
             k = int(math.ceil(T*(self.config.max_block_size/self.config.block_size)))
         else:
             k = self.config.max_block_size
+
         k = min(k, forking_scores_cum_for_topk.shape[-1])
         _, top_k_indices = lax.top_k(forking_scores_cum_for_topk, k)
         top_k_indices = jnp.sort(top_k_indices, axis=-1)
@@ -401,6 +418,11 @@ class ForkingBlock(Block):
                 padding_mask,
                 new_cumulative_scores,
                 float("-inf")
+            )
+            new_cumulative_scores = jnp.where(
+                scores_to_kill, # this is from the "soft" forking above
+                float("-inf")
+                new_cumulative_scores
             )
 
         return x_to_consider, new_cumulative_scores, new_token_indices
