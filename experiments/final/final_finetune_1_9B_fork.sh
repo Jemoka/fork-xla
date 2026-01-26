@@ -42,7 +42,7 @@ srun --export=ALL bash -lc '
       main.py \
       final_68267_finetune_fork \
       --warm_start /sphinx/u/houjun/checkpoints/fork/finetune/final_68267_finetune_fork/recovery \
-      --finetune /sphinx/u/houjun/checkpoints/fork/jax/midtrain/final_68267_midtrain_fork \
+      --finetune /sphinx/u/houjun/checkpoints/fork/jax/midtrain/final_68267_midtrain_fork/best \
       --data_file /juice2/scr2/houjun/fork-xla/experiments/data/gsm8k.toml \
       --flops_promised 989e12 \
       --out_dir /sphinx/u/houjun/checkpoints/fork/jax/finetune \
